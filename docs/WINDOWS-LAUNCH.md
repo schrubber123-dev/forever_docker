@@ -184,9 +184,12 @@ Absence of a Procmon TCP Connect event must not be treated as proof that no
 native connect operation was attempted. To obtain the actual connect result,
 use the standalone helper in `scripts/windows-network-diagnostics/`:
 
-1. Download the `Forever-Network-Diagnostics` artifact from the **Windows network
-   diagnostics** workflow and extract it. Close WoW normally first, keeping the
-   normal launcher open. Double-click `Start-Network-Diagnostics.cmd`.
+1. [Download the ready-to-run diagnostic ZIP](https://raw.githubusercontent.com/schrubber123-dev/forever_docker/main/scripts/Forever-Netzdiagnose.zip)
+   and extract it completely. Its root contains `Start-Network-Diagnostics.cmd`,
+   `Collect-WindowsNetworkTrace.ps1`, `README.txt` and `diagnostic-build.txt`.
+   This bundle contains the Windows-tested helper from revision `a561a96`.
+   Close WoW normally first, keeping the normal launcher open. Double-click
+   `Start-Network-Diagnostics.cmd`.
 2. Accept elevation for the tracing helper only. Press Play in the existing
    **normal, non-elevated launcher** when the helper says the trace is running.
 3. Let the capture finish. Send the ZIP it creates on the Desktop. Keep the raw
@@ -208,6 +211,12 @@ The helper's Windows CI self-test exercises successful and refused loopback
 connections, verifies that socket creation/connect/completion events were
 actually decoded, and exercises XML/ZIP export. That validates collection on the
 runner, not the game or the user's computer.
+
+For future helper changes, regenerate `scripts/Forever-Netzdiagnose.zip` only
+from a revision whose Windows self-test passed, preserve the root file layout,
+and include that full revision in `diagnostic-build.txt`. Verify every archived
+helper file byte-for-byte against the tested sources. The workflow artifact
+`Network-Diagnostics-SelfTest` contains CI evidence, not the user startup files.
 
 Sources: [Winsock tracing control](https://learn.microsoft.com/en-us/windows/win32/winsock/control-of-winsock-tracing),
 [information-level events](https://learn.microsoft.com/en-us/windows/win32/winsock/winsock-tracing-levels),
