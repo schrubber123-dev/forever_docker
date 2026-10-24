@@ -6,8 +6,6 @@ mod dpapi;
 mod game;
 #[cfg(windows)]
 mod windows_diagnostics;
-#[cfg(windows)]
-mod standalone;
 mod i18n;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -218,10 +216,14 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
         system::install_ca_in_prefix(&s)?;
         let account = login.game_accounts.first().map(|a| a.name.clone()).unwrap_or_else(|| "WoW1".into());
         let portal = format!("{}:{}", s.server.portal, s.server.bnet_port);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         game::write_launch_options(&s, &portal, &login.login_ticket, &account)?;
         #[cfg(target_os = "macos")]
         macos::write_launch_options(&portal, &login.login_ticket, &account)?;
+        #[cfg(windows)]
+        crate::windows_diagnostics::record(
+            "Standalone direct mode: skipping CONNECTION_STRING/GAME_ACCOUNT/WEB_TOKEN registry handoff"
+        );
         Ok(())
     })
     .await
