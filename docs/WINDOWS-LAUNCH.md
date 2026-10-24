@@ -313,17 +313,19 @@ queries returned zero for the reported restrictions. These limited queries do
 not identify the reason for the load failure or prove the cause of the original
 private-login failure. No socket API trace was produced.
 
-The helper now captures the full x64 `LoadLibraryW` result and immediate
-`GetLastError` in the same target thread. It interprets the error only if the
-diagnostic returned normally and the module handle is null. Its generated
-diagnostic function and Win64 unwind bytes are recorded; the function table is
-registered and verified before execution, then removed and checked before freeing
-memory. Uncertain completion retains the allocations until process exit. No
-protection policy, Agent state, game code or launch argument is overridden.
-Windows CI additionally checks the unwind metadata and verifies same-thread error
-126 (`ERROR_MOD_NOT_FOUND`) for an intentionally absent owned DLL before the
-existing successful-load/socket tests. A successful failure-path ZIP export now
-prints the exact ZIP path as well as the local output folder.
+The next capture did not reach `LoadLibraryW`: its dynamic Win64 function-table
+registration returned zero, so the generated non-leaf loader stub was deliberately
+not executed. This is a diagnostic-helper failure, not evidence that the game
+rejected the DLL.
+
+The helper therefore no longer depends on a generated non-leaf frame or
+`RtlAddFunctionTable`. It now invokes native `LdrLoadDll` through a small x64
+leaf tail-call adapter. The native loader returns its full `NTSTATUS` as the
+thread result and writes the full x64 module handle to an output slot; the helper
+also maps that status through `RtlNtStatusToDosError` for a familiar Win32 code.
+No protection policy, Agent state, game code or launch argument is overridden.
+Windows CI verifies that an intentionally absent owned DLL maps to Win32 error 126
+(`ERROR_MOD_NOT_FOUND`) before the existing successful-load/socket tests.
 
 ## Earlier compilation checks
 
