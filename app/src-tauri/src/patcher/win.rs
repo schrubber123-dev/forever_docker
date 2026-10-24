@@ -7,7 +7,9 @@ use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcess
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_READWRITE};
+use windows::Win32::System::Memory::{
+    VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_GUARD, PAGE_NOACCESS,
+};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
@@ -59,7 +61,17 @@ impl Memory for ProcessMemory {
                 break;
             }
             let base = info.BaseAddress as usize;
-            if info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && info.Protect == PAGE_READWRITE {
+            // 70450 does not keep the region-group key store under one stable
+            // protection value for its whole lifetime. The old code required exact
+            // PAGE_READWRITE, which can miss the store when Windows/Arxan gives the
+            // allocation another readable MEM_PRIVATE protection or modifier.
+            //
+            // ReadProcessMemory is still the authority: include committed private
+            // regions except explicit NOACCESS/GUARD and let failed reads be skipped.
+            // The patcher only writes after validating the complete 12-entry key-store
+            // structure, so broadening discovery does not broaden what can be patched.
+            let blocked = (info.Protect.0 & (PAGE_NOACCESS.0 | PAGE_GUARD.0)) != 0;
+            if info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && !blocked {
                 out.push((base as u64, (base + info.RegionSize) as u64));
             }
             let next = base.saturating_add(info.RegionSize);
