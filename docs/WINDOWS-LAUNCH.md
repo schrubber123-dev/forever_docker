@@ -158,7 +158,61 @@ No Agent bypass, extra region/product registry values, protocol changes, build
 changes or launch-argument changes are implemented. Await the runtime results
 before choosing a behavioral fix.
 
-## Tests
+## Native client log finding and socket diagnostics
+
+The supplied client logs from 2026-10-24 11:33-11:34 select the private endpoint:
+
+```text
+Glue login started ... launcherPortal="trinity.actual.battle.net:1119" loginPortal="trinity.actual.battle.net:1119"
+Battle.net logon requested host="trinity.actual.battle.net" port="1119"
+Battle.net front disconnected ... reason="ERROR_NETWORK_MODULE_SOCKET_CLOSED (1016)"
+```
+
+The request and error share the same logged millisecond. This proves endpoint
+selection and a native socket-closed result, not its underlying cause or whether
+the peer was contacted. The two uploads of these connection logs are identical,
+not two independent reproductions. The earlier Procmon excerpt is from 11:05;
+do not combine them as a synchronized network capture.
+
+This evidence weakens the hypothesis that Agent prevents reaching the login path.
+Agent's `playable:false` is still a reported product state, not a proven blocking
+branch. No Agent bypass, build change, guessed signature or transport override is
+justified. Likewise, the QUIC message concerns enabling logging, not a proven
+transport failure.
+
+Absence of a Procmon TCP Connect event must not be treated as proof that no
+native connect operation was attempted. To obtain the actual connect result,
+use the standalone helper in `scripts/windows-network-diagnostics/`:
+
+1. Download the `Forever-Network-Diagnostics` artifact from the **Windows network
+   diagnostics** workflow and extract it. Double-click `Start-Network-Diagnostics.cmd`.
+2. Accept elevation for the tracing helper only. Press Play in the existing
+   **normal, non-elevated launcher** when the helper says the trace is running.
+3. Let the capture finish. Send the ZIP it creates on the Desktop. Keep the raw
+   ETL files locally. The helper does not launch, patch or stop the game or Agent.
+
+The helper records machine-wide socket metadata and DNS names, so close unrelated
+applications first. It explicitly enables only Winsock-AFD and DNS-Client at
+information level 4, with bounded circular ETL files. It does not enable packet,
+HTTP-body, registry or process-environment capture. Provider availability and ETW
+decoding must succeed; failures must not be interpreted as absence of traffic.
+
+Microsoft documents AFD socket-create events with `UserModePid`, connect requests
+(IDs 4/5), connect completion/error (ID 6), bind failures, resets and closes at
+this level. Correlate later events by their kernel Process/Endpoint fields back
+to socket creation; asynchronous events can have a System header PID. Inspect
+the loss summary before making any claim about missing events.
+
+The helper's Windows CI self-test exercises successful and refused loopback
+connections, verifies that socket creation/connect/completion events were
+actually decoded, and exercises XML/ZIP export. That validates collection on the
+runner, not the game or the user's computer.
+
+Sources: [Winsock tracing control](https://learn.microsoft.com/en-us/windows/win32/winsock/control-of-winsock-tracing),
+[information-level events](https://learn.microsoft.com/en-us/windows/win32/winsock/winsock-tracing-levels),
+[event fields](https://learn.microsoft.com/en-us/windows/win32/winsock/winsock-tracing-event-details).
+
+## Earlier compilation checks
 
 Run `cargo test --locked --lib` in `app/src-tauri` with `FOREVER_CA_CERT` set to a
 public PEM CA certificate. Windows additionally runs a native DPAPI test covering

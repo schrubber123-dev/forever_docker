@@ -1,0 +1,48 @@
+name: Windows network diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/windows-network-diagnostics/**"
+      - ".github/workflows/windows-network-diagnostics.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exercise native socket capture and XML export
+        shell: powershell
+        run: |
+          try {
+            & ./scripts/windows-network-diagnostics/Collect-WindowsNetworkTrace.ps1 -SelfTest -OutputRoot $env:RUNNER_TEMP
+            if ($LASTEXITCODE -ne 0) { throw "Self-test exited with code $LASTEXITCODE; see the SelfTest artifact control.txt and markers.txt." }
+          } catch {
+            Write-Output "::error title=Native network self-test failed::$($_.Exception.Message)"
+            exit 1
+          }
+
+      - name: Record helper revision
+        shell: powershell
+        run: Set-Content scripts/windows-network-diagnostics/diagnostic-build.txt "revision=${{ github.sha }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Forever-Network-Diagnostics
+          path: scripts/windows-network-diagnostics/
+          if-no-files-found: error
+
+      - name: Retain self-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Network-Diagnostics-SelfTest
+          path: ${{ runner.temp }}/Forever-Network-*/
+          if-no-files-found: warn
