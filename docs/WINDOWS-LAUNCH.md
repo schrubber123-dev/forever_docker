@@ -307,6 +307,24 @@ If an old failed attempt produced `socket-*.log`, it may already contain useful
 data despite the verification error. Close WoW normally and collect only that
 file and `markers.txt`; never upload the local original backup or the DLL.
 
+The next capture confirmed successful module enumeration with the diagnostic DLL
+absent and the target still running. Its signature, dynamic-code and CFG policy
+queries returned zero for the reported restrictions. These limited queries do
+not identify the reason for the load failure or prove the cause of the original
+private-login failure. No socket API trace was produced.
+
+The helper now captures the full x64 `LoadLibraryW` result and immediate
+`GetLastError` in the same target thread. It interprets the error only if the
+diagnostic returned normally and the module handle is null. Its generated
+diagnostic function and Win64 unwind bytes are recorded; the function table is
+registered and verified before execution, then removed and checked before freeing
+memory. Uncertain completion retains the allocations until process exit. No
+protection policy, Agent state, game code or launch argument is overridden.
+Windows CI additionally checks the unwind metadata and verifies same-thread error
+126 (`ERROR_MOD_NOT_FOUND`) for an intentionally absent owned DLL before the
+existing successful-load/socket tests. A successful failure-path ZIP export now
+prints the exact ZIP path as well as the local output folder.
+
 ## Earlier compilation checks
 
 Run `cargo test --locked --lib` in `app/src-tauri` with `FOREVER_CA_CERT` set to a

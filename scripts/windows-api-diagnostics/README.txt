@@ -6,6 +6,8 @@ Forever 70450 - native Socket-Diagnose
    dieses Diagnoseprogramm. Das Spiel startet weiterhin aus dem normalen Launcher.
 4. Bei "JETZT ... Play" im normalen Launcher auf Play klicken.
 5. Bis "ZIP erstellt" warten (etwa 60 Sekunden ab erkannter Diagnosebereitschaft).
+   Auch bei "DIAGNOSEFEHLER" wird der genaue Pfad der Ergebnis-ZIP angezeigt,
+   sofern der ZIP-Export gelingt. Sende diese ZIP, nicht den Ausgabeordner.
 6. Die neu erzeugte Forever-API-....zip vom Desktop im Chat hochladen.
 
 Diese Diagnose laedt voruebergehend ein eigenes Modul in WowB.exe und protokolliert
@@ -41,14 +43,20 @@ Wenn "DIAGNOSEFEHLER" erscheint, dessen Text und eine gegebenenfalls erzeugte
 Ergebnis-ZIP senden. Keine Speicherabbilder oder Clientdateien hochladen.
 Die Ladepruefung unterscheidet fehlgeschlagene Modulabfragen von einer erfolgreich
 geprueften, aber fehlenden DLL. Sie wiederholt kurzzeitig instabile Abfragen und
-schreibt Stufe/Windows-Fehlercode sowie den Load-Thread-Rueckgabewert in markers.txt.
-Dieser Rueckgabewert ist kein remote GetLastError. Schutzrichtlinien werden nur
-abgefragt und nicht abgeschaltet. Ein vorhandenes socket-*.log kann trotz einer
-frueheren Ladepruefungs-Fehlermeldung bereits nuetzlich sein.
+schreibt Stufe/Windows-Fehlercode in markers.txt. Der Ladeaufruf erfasst den vollen
+x64-Modulhandle und GetLastError direkt im selben Ziel-Thread. Nur ein normal
+abgeschlossener, fehlgeschlagener LoadLibraryW-Aufruf liefert einen gueltigen
+Win32-Ladefehler. Der Thread-Rueckgabewert allein ist kein GetLastError.
+Die kleine Diagnosefunktion und ihre Win64-Unwind-Metadaten werden protokolliert;
+Registrierung und Entfernung werden vor Ausfuehrung bzw. Speicherfreigabe geprueft.
+Schutzrichtlinien werden nur abgefragt und nicht abgeschaltet. Ein vorhandenes
+socket-*.log kann trotz einer frueheren Ladepruefungs-Fehlermeldung nuetzlich sein.
 
 Quellcode: scripts/windows-api-diagnostics/ im Repository schrubber123-dev/forever_docker.
 Abhaengigkeit: MinHook v1.3.4, exakt Commit c3fcafdc10146beb5919319d0683e44e3c30d537.
 Lizenztexte werden mitgeliefert. diagnostic-build.txt nennt die genaue Quellrevision.
 Der Windows-Selbsttest injiziert ausschliesslich einen eigenen Testprozess und
-prueft echte Socketaufrufe, ConnectionRefused/InvalidSocket und Last-Error-Erhaltung.
+prueft echte Socketaufrufe, ConnectionRefused/InvalidSocket und Last-Error-Erhaltung,
+ausserdem den Ladefehler 126 bei einer absichtlich fehlenden eigenen DLL und die
+Win64-Unwind-Metadaten der Diagnosefunktion.
 Er beweist keine Fehlerursache oder Kompatibilitaet mit dem eigentlichen Spiel.

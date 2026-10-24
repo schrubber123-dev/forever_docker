@@ -12,6 +12,9 @@
 #include <bcrypt.h>
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -200,37 +203,199 @@ void LoaderPolicies(HANDLE process,const fs::path& folder) {
         Mark(folder,"Read-only CFG policy: enabled="+std::to_string(cfg.EnableControlFlowGuard)+" strict="+std::to_string(cfg.StrictMode));
     else Mark(folder,"CFG-policy query unavailable, Win32="+std::to_string(GetLastError()));
 }
-uintptr_t RemoteLoadLibrary(DWORD pid) {
-    auto local=reinterpret_cast<uintptr_t>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW"));
-    if (!local) WinFail("GetProcAddress LoadLibraryW");
+uintptr_t RemoteApi(DWORD pid,const char* name,const fs::path& folder) {
+    auto local=reinterpret_cast<uintptr_t>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"),name));
+    if(!local)WinFail("GetProcAddress loader API");
     HMODULE owner=nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(local),&owner)) WinFail("GetModuleHandleExW");
+    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(local),&owner))WinFail("GetModuleHandleExW loader API");
     wchar_t ownerPath[32768]{};
-    if (!GetModuleFileNameW(owner,ownerPath,32768)) WinFail("GetModuleFileNameW LoadLibrary owner");
+    if(!GetModuleFileNameW(owner,ownerPath,32768))WinFail("GetModuleFileNameW loader API owner");
     RemoteModule remote=FindModule(pid,fs::path(ownerPath).filename().wstring());
     uintptr_t rva=local-reinterpret_cast<uintptr_t>(owner);
-    if (!remote.base || rva>=remote.size) throw std::runtime_error("Cannot map LoadLibraryW into target system module; "+LookupText(remote));
+    if(!remote.base||rva>=remote.size)throw std::runtime_error(std::string("Cannot map ")+name+" into target system module; "+LookupText(remote));
+    std::ostringstream audit;audit<<"Loader API="<<name<<" remoteModuleBase=0x"<<std::hex<<remote.base<<" rva=0x"<<rva;
+    Mark(folder,audit.str());
     return remote.base+rva;
+}
+struct LoaderContext {
+    uint64_t loadLibrary;
+    uint64_t getLastError;
+    uint64_t path;
+    uint64_t module;
+    DWORD error;
+    DWORD completed;
+};
+static_assert(sizeof(LoaderContext)==40,"Loader diagnostic layout must remain exactly 40 bytes.");
+static_assert(offsetof(LoaderContext,loadLibrary)==0&&offsetof(LoaderContext,getLastError)==8&&offsetof(LoaderContext,path)==16&&offsetof(LoaderContext,module)==24&&offsetof(LoaderContext,error)==32&&offsetof(LoaderContext,completed)==36,"Loader stub context offsets changed.");
+struct LoaderResult {
+    LoaderContext context{};
+    DWORD threadExit=0;
+};
+struct RemoteAllocation {
+    HANDLE process;
+    void* address=nullptr;
+    bool retain=false;
+    explicit RemoteAllocation(HANDLE value):process(value){}
+    ~RemoteAllocation(){if(address&&!retain)VirtualFreeEx(process,address,0,MEM_RELEASE);}
+    RemoteAllocation(const RemoteAllocation&)=delete;
+    RemoteAllocation& operator=(const RemoteAllocation&)=delete;
+};
+// The main diagnostic has a real non-leaf Win64 frame. Its function table is
+// registered before execution and removed only after its thread has finished.
+static constexpr BYTE LoaderStub[]={
+    0xF3,0x0F,0x1E,0xFA,           // ENDBR64
+    0x53,                         // push rbx, prologue offset 5
+    0x48,0x83,0xEC,0x20,          // sub rsp,32, prologue offset 9
+    0x48,0x89,0xCB,               // mov rbx,rcx
+    0x48,0x8B,0x4B,0x10,          // mov rcx,[rbx+16]
+    0xFF,0x13,                    // call [rbx] (LoadLibraryW)
+    0x48,0x89,0x43,0x18,          // mov [rbx+24],rax (full HMODULE)
+    0xFF,0x53,0x08,               // call [rbx+8] (same-thread GetLastError)
+    0x89,0x43,0x20,               // mov [rbx+32],eax
+    0xC7,0x43,0x24,0x01,0x00,0x00,0x00, // completed=1
+    0x31,0xC0,                    // xor eax,eax
+    0x48,0x83,0xC4,0x20,          // add rsp,32
+    0x5B,0xC3                     // pop rbx; ret
+};
+static constexpr BYTE LoaderUnwind[]={0x01,0x09,0x02,0x00,0x09,0x32,0x05,0x30};
+static constexpr SIZE_T LoaderUnwindOffset=44;
+static_assert(sizeof(LoaderStub)==43&&sizeof(LoaderUnwind)==8,"Loader layout/unwind metadata changed.");
+// Leaf tail-call adapter: only volatile registers change, RSP/return address are
+// untouched. The actual Windows API returns directly to the system thread thunk.
+static constexpr BYTE LoaderLeaf[]={
+    0xF3,0x0F,0x1E,0xFA,           // ENDBR64
+    0x48,0x89,0xC8,               // mov rax,rcx (context)
+    0x4C,0x8B,0x40,0x18,          // mov r8,[rax+24] (argument 3)
+    0x48,0x8B,0x50,0x10,          // mov rdx,[rax+16] (argument 2)
+    0x48,0x8B,0x48,0x08,          // mov rcx,[rax+8] (argument 1)
+    0xFF,0x20                     // jmp [rax] (Windows API owns its unwind data)
+};
+struct LoaderLeafContext { uint64_t function;uint64_t arg1;uint64_t arg2;uint64_t arg3; };
+static_assert(sizeof(LoaderLeafContext)==32&&offsetof(LoaderLeafContext,arg1)==8&&offsetof(LoaderLeafContext,arg2)==16&&offsetof(LoaderLeafContext,arg3)==24,"Leaf context layout changed.");
+static constexpr SIZE_T LoaderLeafOffset=LoaderUnwindOffset+sizeof(LoaderUnwind);
+static constexpr SIZE_T LoaderCodeBytes=LoaderLeafOffset+sizeof(LoaderLeaf);
+void VerifyLoaderUnwind() {
+    // Exercise the hand-written metadata without executing generated code. This
+    // is the stack state immediately after push RBX/sub RSP,32 (prologue byte 9).
+    alignas(16) BYTE image[LoaderCodeBytes]{};
+    memcpy(image,LoaderStub,sizeof(LoaderStub));memcpy(image+LoaderUnwindOffset,LoaderUnwind,sizeof(LoaderUnwind));
+    RUNTIME_FUNCTION function{};function.BeginAddress=0;function.EndAddress=sizeof(LoaderStub);function.UnwindData=LoaderUnwindOffset;
+    alignas(16) DWORD64 stack[16]{};
+    const DWORD64 savedRbx=0x1122334455667788ULL;
+    const DWORD64 returnPc=reinterpret_cast<DWORD64>(&VerifyLoaderUnwind);
+    stack[8]=savedRbx;stack[9]=returnPc;
+    CONTEXT context{};context.ContextFlags=CONTEXT_FULL;
+    context.Rsp=reinterpret_cast<DWORD64>(&stack[4]);context.Rip=reinterpret_cast<DWORD64>(image)+9;context.Rbx=0;
+    PVOID handler=nullptr;DWORD64 frame=0;
+    RtlVirtualUnwind(UNW_FLAG_NHANDLER,reinterpret_cast<DWORD64>(image),context.Rip,&function,&context,&handler,&frame,nullptr);
+    if(context.Rbx!=savedRbx||context.Rip!=returnPc||context.Rsp!=reinterpret_cast<DWORD64>(&stack[10]))
+        throw std::runtime_error("Self-test loader unwind metadata did not restore RBX, RIP and RSP.");
+}
+LoaderResult CaptureLoaderResult(HANDLE process,DWORD pid,const fs::path& path,const fs::path& folder) {
+    PROCESS_MITIGATION_DYNAMIC_CODE_POLICY dynamic{};
+    if(GetProcessMitigationPolicy(process,ProcessDynamicCodePolicy,&dynamic,sizeof(dynamic))&&dynamic.ProhibitDynamicCode)
+        throw std::runtime_error("Target policy prohibits executable diagnostic memory; no policy was changed.");
+    const std::wstring wide=path.wstring();
+    if(wide.size()>32767)throw std::runtime_error("Diagnostic DLL path exceeds the Windows path bound.");
+    const SIZE_T pathBytes=(wide.size()+1)*sizeof(wchar_t);
+    const SIZE_T tableOffset=(sizeof(LoaderContext)+pathBytes+7)&~SIZE_T(7);
+    const SIZE_T leafContextOffset=(tableOffset+sizeof(RUNTIME_FUNCTION)+7)&~SIZE_T(7);
+    const SIZE_T imageBaseOffset=leafContextOffset+sizeof(LoaderLeafContext);
+    const SIZE_T dataBytes=imageBaseOffset+sizeof(DWORD64);
+    RemoteAllocation data(process),code(process);
+    data.address=VirtualAllocEx(process,nullptr,dataBytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+    if(!data.address)WinFail("VirtualAllocEx loader diagnostic data");
+    code.address=VirtualAllocEx(process,nullptr,LoaderCodeBytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+    if(!code.address)WinFail("VirtualAllocEx loader diagnostic code");
+    const uintptr_t dataBase=reinterpret_cast<uintptr_t>(data.address),codeBase=reinterpret_cast<uintptr_t>(code.address);
+    const uintptr_t tableAddress=dataBase+tableOffset,leafContextAddress=dataBase+leafContextOffset;
+    auto write=[&](uintptr_t to,const void* from,SIZE_T bytes,const char* what){
+        SIZE_T written=0;if(!WriteProcessMemory(process,reinterpret_cast<void*>(to),from,bytes,&written)||written!=bytes)WinFail(what);
+    };
+    LoaderContext context{};context.loadLibrary=RemoteApi(pid,"LoadLibraryW",folder);context.getLastError=RemoteApi(pid,"GetLastError",folder);context.path=dataBase+sizeof(LoaderContext);
+    RUNTIME_FUNCTION function{};function.BeginAddress=0;function.EndAddress=sizeof(LoaderStub);function.UnwindData=LoaderUnwindOffset;
+    write(dataBase,&context,sizeof(context),"WriteProcessMemory loader diagnostic context");
+    write(context.path,wide.c_str(),pathBytes,"WriteProcessMemory loader diagnostic path");
+    write(tableAddress,&function,sizeof(function),"WriteProcessMemory loader diagnostic function table");
+    write(codeBase,LoaderStub,sizeof(LoaderStub),"WriteProcessMemory loader diagnostic code");
+    write(codeBase+LoaderUnwindOffset,LoaderUnwind,sizeof(LoaderUnwind),"WriteProcessMemory loader unwind metadata");
+    write(codeBase+LoaderLeafOffset,LoaderLeaf,sizeof(LoaderLeaf),"WriteProcessMemory loader leaf adapter");
+    DWORD oldProtection=0;
+    if(!VirtualProtectEx(process,code.address,LoaderCodeBytes,PAGE_EXECUTE_READ,&oldProtection))WinFail("VirtualProtectEx loader diagnostic RX");
+    if(!FlushInstructionCache(process,code.address,LoaderCodeBytes))WinFail("FlushInstructionCache loader diagnostic code");
+    std::ostringstream audit;audit<<"LOADER_DIAGNOSTIC_STUB code=0x"<<std::hex<<codeBase<<" data=0x"<<dataBase<<" mainLength="<<std::dec<<sizeof(LoaderStub)<<" unwindOffset="<<LoaderUnwindOffset<<" leafOffset="<<LoaderLeafOffset<<" protection=RX bytes=";
+    for(BYTE value:LoaderStub)audit<<std::hex<<std::setw(2)<<std::setfill('0')<<static_cast<unsigned>(value);
+    audit<<" unwind=";for(BYTE value:LoaderUnwind)audit<<std::hex<<std::setw(2)<<std::setfill('0')<<static_cast<unsigned>(value);
+    audit<<" leaf=";for(BYTE value:LoaderLeaf)audit<<std::hex<<std::setw(2)<<std::setfill('0')<<static_cast<unsigned>(value);
+    Mark(folder,audit.str());
+    bool callInProgress=false,tableMayBeRegistered=false;
+    auto run=[&](uintptr_t start,uintptr_t argument)->DWORD{
+        Handle thread(CreateRemoteThread(process,nullptr,0,reinterpret_cast<LPTHREAD_START_ROUTINE>(start),reinterpret_cast<void*>(argument),0,nullptr));
+        if(!thread.h)WinFail("CreateRemoteThread loader diagnostic");
+        data.retain=true;code.retain=true;callInProgress=true;
+        DWORD wait=WaitForSingleObject(thread,15000);
+        if(wait!=WAIT_OBJECT_0)throw std::runtime_error("Loader diagnostic did not finish; registered code/data retained safely until process exit. Close WoW normally before retrying.");
+        callInProgress=false;DWORD exit=0;if(!GetExitCodeThread(thread,&exit))WinFail("GetExitCodeThread loader diagnostic");return exit;
+    };
+    auto leaf=[&](uintptr_t api,uint64_t arg1,uint64_t arg2,uint64_t arg3)->DWORD{
+        LoaderLeafContext args{api,arg1,arg2,arg3};write(leafContextAddress,&args,sizeof(args),"WriteProcessMemory loader leaf context");
+        return run(codeBase+LoaderLeafOffset,leafContextAddress);
+    };
+    const uintptr_t addTable=RemoteApi(pid,"RtlAddFunctionTable",folder);
+    const uintptr_t deleteTable=RemoteApi(pid,"RtlDeleteFunctionTable",folder);
+    const uintptr_t lookupFunction=RemoteApi(pid,"RtlLookupFunctionEntry",folder);
+    auto release=[&]()->bool{
+        if(callInProgress)return false;
+        if(tableMayBeRegistered){
+            DWORD removed=leaf(deleteTable,tableAddress,0,0);
+            Mark(folder,"Loader unwind deregistration thread exit="+std::to_string(removed));
+            if((removed&0xFF)!=TRUE)return false;
+            // A positive BOOLEAN alone must not release referenced code/data.
+            // This image is private generated code, so no table should remain.
+            DWORD64 noImage=0;write(dataBase+imageBaseOffset,&noImage,sizeof(noImage),"WriteProcessMemory post-delete unwind lookup result");
+            DWORD remaining=leaf(lookupFunction,codeBase+9,dataBase+imageBaseOffset,0);
+            DWORD64 remainingBase=0;SIZE_T read=0;
+            if(!ReadProcessMemory(process,reinterpret_cast<void*>(dataBase+imageBaseOffset),&remainingBase,sizeof(remainingBase),&read)||read!=sizeof(remainingBase))WinFail("ReadProcessMemory post-delete unwind lookup result");
+            if(remaining!=0||remainingBase!=0)return false;
+            Mark(folder,"Loader unwind removal verified by lookup before freeing diagnostic allocations");
+            tableMayBeRegistered=false;
+        }
+        data.retain=false;code.retain=false;return true;
+    };
+    try {
+        // Conservatively retain allocations if registration's outcome is unknown.
+        tableMayBeRegistered=true;
+        DWORD added=leaf(addTable,tableAddress,1,codeBase);
+        Mark(folder,"Loader unwind registration thread exit="+std::to_string(added));
+        if((added&0xFF)!=TRUE)throw std::runtime_error("Cannot confirm diagnostic unwind registration; generated loader code was not executed.");
+        // Confirm the table is discoverable before executing the non-leaf stub.
+        DWORD64 initialBase=0;write(dataBase+imageBaseOffset,&initialBase,sizeof(initialBase),"WriteProcessMemory unwind lookup result");
+        DWORD found=leaf(lookupFunction,codeBase+9,dataBase+imageBaseOffset,0);
+        DWORD64 foundBase=0;SIZE_T read=0;
+        if(!ReadProcessMemory(process,reinterpret_cast<void*>(dataBase+imageBaseOffset),&foundBase,sizeof(foundBase),&read)||read!=sizeof(foundBase))WinFail("ReadProcessMemory unwind lookup result");
+        if(foundBase!=codeBase||found!=static_cast<DWORD>(tableAddress))throw std::runtime_error("Registered diagnostic unwind table could not be verified; loader code was not executed.");
+        Mark(folder,"Loader unwind table registered and verified before LoadLibraryW");
+        LoaderResult result{};result.threadExit=run(codeBase,dataBase);
+        if(!ReadProcessMemory(process,data.address,&result.context,sizeof(result.context),&read)||read!=sizeof(result.context))WinFail("ReadProcessMemory loader diagnostic result");
+        std::ostringstream value;value<<"Same-thread loader result: completed="<<result.context.completed<<" module64=0x"<<std::hex<<result.context.module<<" threadExit=0x"<<result.threadExit<<std::dec;
+        if(result.context.completed!=1||result.threadExit!=0)value<<" Win32Error=invalid (loader diagnostic did not return normally)";
+        else if(result.context.module)value<<" Win32Error=ignored (successful LoadLibraryW)";
+        else value<<" Win32Error="<<result.context.error;
+        Mark(folder,value.str());
+        if(!release())throw std::runtime_error("Cannot confirm diagnostic unwind removal; code/data retained safely until process exit.");
+        if(result.context.completed!=1||result.threadExit!=0)throw std::runtime_error("Loader diagnostic did not complete normally; no valid remote Win32 loader error was captured.");
+        return result;
+    } catch(...) {
+        // Unknown/running thread or failed deregistration means retaining both
+        // allocations. Never leave a registered table pointing at freed storage.
+        try { if(!release())Mark(folder,"Loader diagnostic code/data retained because cleanup could not be confirmed"); }
+        catch(...) { data.retain=true;code.retain=true; }
+        throw;
+    }
 }
 void Inject(HANDLE process,DWORD pid,const fs::path& dll,const fs::path& folder) {
     LoaderPolicies(process,folder);
-    size_t bytes=(dll.wstring().size()+1)*sizeof(wchar_t);
-    void* remote=VirtualAllocEx(process,nullptr,bytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
-    if (!remote) WinFail("VirtualAllocEx");
-    SIZE_T written=0;
-    if (!WriteProcessMemory(process,remote,dll.c_str(),bytes,&written) || written!=bytes) { VirtualFreeEx(process,remote,0,MEM_RELEASE);WinFail("WriteProcessMemory DLL path"); }
-    uintptr_t loader=0;
-    try { loader=RemoteLoadLibrary(pid); } catch (...) { VirtualFreeEx(process,remote,0,MEM_RELEASE);throw; }
-    Handle thread(CreateRemoteThread(process,nullptr,0,reinterpret_cast<LPTHREAD_START_ROUTINE>(loader),remote,0,nullptr));
-    if (!thread.h) { VirtualFreeEx(process,remote,0,MEM_RELEASE);WinFail("CreateRemoteThread LoadLibraryW"); }
-    DWORD wait=WaitForSingleObject(thread,15000);
-    // If a remote call is still running, leave its argument alive until process exit.
-    if (wait!=WAIT_OBJECT_0) throw std::runtime_error("DLL load timed out; remote argument retained safely. Close WoW normally before retrying.");
-    DWORD loadExit=0;
-    if(!GetExitCodeThread(thread,&loadExit)) { VirtualFreeEx(process,remote,0,MEM_RELEASE);WinFail("GetExitCodeThread DLL load"); }
-    VirtualFreeEx(process,remote,0,MEM_RELEASE);
-    std::ostringstream code;code<<"Load thread completed; low32Exit=0x"<<std::hex<<loadExit<<" (not a full x64 HMODULE or remote GetLastError)";
-    Mark(folder,code.str());
+    const LoaderResult result=CaptureLoaderResult(process,pid,dll,folder);
     RemoteModule loaded=FindModule(pid,dll.wstring(),true);
     // Do not inject a second copy. A successful but stale snapshot may settle shortly.
     for(unsigned poll=0;!loaded.base&&!loaded.lookupError&&poll<20;++poll) {
@@ -240,11 +405,13 @@ void Inject(HANDLE process,DWORD pid,const fs::path& dll,const fs::path& folder)
     Mark(folder,"Load verification: "+LookupText(loaded));
     if(!loaded.base) {
         DWORD exitCode=0;
-        if(GetExitCodeProcess(process,&exitCode)) Mark(folder,"Target process state="+std::to_string(exitCode)+" (259 means still active)");
-        if(loaded.lookupError)
-            throw std::runtime_error("Diagnostic module inspection failed; "+LookupText(loaded)+". This does not prove DLL rejection.");
-        throw std::runtime_error("Diagnostic module absent after successful inspection; "+code.str()+". Remote loader error is not available from this thread result.");
+        if(GetExitCodeProcess(process,&exitCode))Mark(folder,"Target process state="+std::to_string(exitCode)+" (259 means still active)");
+        if(loaded.lookupError)throw std::runtime_error("Diagnostic module inspection failed; "+LookupText(loaded)+". This does not prove DLL rejection.");
+        if(!result.context.module)
+            throw std::runtime_error("LoadLibraryW rejected diagnostic DLL; same-thread Win32Error="+std::to_string(result.context.error)+". No security policy was changed.");
+        throw std::runtime_error("LoadLibraryW returned a module, but successful module inspection did not find the diagnostic DLL.");
     }
+    if(!result.context.module)throw std::runtime_error("Inconsistent loader result: module inspection found the diagnostic DLL after LoadLibraryW returned null.");
 }
 void Stop(HANDLE process,DWORD pid,const fs::path& dll) {
     if (WaitForSingleObject(process,0)==WAIT_OBJECT_0) return;
@@ -369,6 +536,7 @@ int wmain(int argc,wchar_t** argv) {
         fs::copy_file(ModulePath().parent_path()/L"ForeverSocketTrace.dll",dll,fs::copy_options::none);
         Mark(folder,std::string("collector_pid=")+std::to_string(GetCurrentProcessId())+" SelfTest="+(self?"True":"False"));
         if(self){
+            VerifyLoaderUnwind();Mark(folder,"SELFTEST synthetic loader unwind restores RBX/RIP/RSP");
             auto present=FindModule(GetCurrentProcessId(),L"kernel32.dll");
             auto absent=FindModule(GetCurrentProcessId(),L"Forever-Definitely-Absent-Module.dll");
             auto invalid=FindModule(0xFFFFFFFF,L"kernel32.dll");
@@ -400,6 +568,14 @@ int wmain(int argc,wchar_t** argv) {
         fs::copy_file(targetImage,backup,fs::copy_options::none);
         if(FileSha256(backup)!=originalHash)throw std::runtime_error("Original-file backup SHA256 mismatch; no injection performed.");
         Mark(folder,"Clean original-file backup verified locally; original-backup is excluded from upload ZIP");
+        if(self){
+            fs::path missing=folder/L"Forever-Intentionally-Missing-Diagnostic.dll";
+            if(fs::exists(missing))throw std::runtime_error("Self-test missing-DLL path unexpectedly exists.");
+            const LoaderResult negative=CaptureLoaderResult(process,targetPid,missing,folder);
+            if(negative.context.completed!=1||negative.context.module!=0||negative.context.error!=ERROR_MOD_NOT_FOUND||negative.threadExit!=0)
+                throw std::runtime_error("Self-test did not capture ERROR_MOD_NOT_FOUND from the same remote loader thread.");
+            Mark(folder,"SELFTEST same-thread missing-DLL Win32 error 126 verified");
+        }
         Inject(process,targetPid,dll,folder);Ready(log,process);Mark(folder,"TRACE_READY confirmed");
         if(self){
             if(!SetEvent(gate))WinFail("SetEvent self-test");
@@ -436,7 +612,16 @@ int wmain(int argc,wchar_t** argv) {
             }catch(const std::exception& stop){std::cerr<<"Stop: "<<stop.what()<<"\n";}
         }
         if(self){if(gate.h)SetEvent(gate);if(finishGate.h)SetEvent(finishGate);if(process.h)WaitForSingleObject(process,5000);}
-        if(!folder.empty()){try{Mark(folder,std::string("FAILED: ")+e.what());if(!log.empty())Zip(folder,log);}catch(...){}std::wcout<<L"Dateien: "<<folder<<L"\n";}
+        if(!folder.empty()){
+            try {
+                Mark(folder,std::string("FAILED: ")+e.what());
+                if(!log.empty()){
+                    Zip(folder,log);
+                    std::wcout<<L"ZIP erstellt: "<<folder.wstring()<<L".zip\n"<<std::flush;
+                }
+            }catch(const std::exception& zipError){std::cerr<<"ZIP-Export fehlgeschlagen: "<<zipError.what()<<"\n";}
+            std::wcout<<L"Lokaler Ausgabeordner: "<<folder<<L"\n";
+        }
         if(self)std::cerr<<"::error title=Native API diagnostic self-test failed::"<<e.what()<<"\n";
     }
     if(!self){std::wcout<<L"Enter zum Schliessen.\n"<<std::flush;std::wstring line;std::getline(std::wcin,line);}return result;
