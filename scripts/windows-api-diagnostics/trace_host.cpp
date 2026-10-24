@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <winver.h>
 #include <bcrypt.h>
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <iomanip>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <regex>
 #include <map>
