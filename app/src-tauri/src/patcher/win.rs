@@ -210,7 +210,7 @@ impl ProcessMemory {
     pub fn apply_tls_cert_poc(&self) -> Result<Vec<String>, String> {
         use std::time::{Duration, Instant};
 
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(120);
         let mut seen = (0usize, 0usize, 0usize);
 
         loop {
@@ -227,7 +227,7 @@ impl ProcessMemory {
             }
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "no 70450 TLS certificate patterns found after 20s (bundle={}, common-name={}, chain={})",
+                    "no 70450 TLS certificate patterns found after 120s, including the manual login window (bundle={}, common-name={}, chain={})",
                     seen.0, seen.1, seen.2
                 ));
             }
