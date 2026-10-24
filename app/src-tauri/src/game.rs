@@ -128,26 +128,15 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
 
 #[cfg(windows)]
 pub fn spawn(settings: &Settings) -> Result<Child, String> {
-    use std::os::windows::process::CommandExt;
-    use windows::Win32::System::Threading::CREATE_SUSPENDED;
-
     let baseline = crate::windows_diagnostics::before_launch();
     crate::windows_diagnostics::record(
-        "Standalone PoC: creating WowB suspended without -launcherlogin; no DLL injection"
+        "Standalone direct mode: starting WowB with -config only (no -launcherlogin, no suspended pre-patch)"
     );
-    let mut child = Command::new(settings.exe())
+    let child = Command::new(settings.exe())
         .args(["-config", WTF_NAME])
         .current_dir(&settings.game_dir)
-        .creation_flags(CREATE_SUSPENDED.0)
         .spawn()
         .map_err(|e| tf("launch_failed", &[&"WowB.exe", &e]))?;
-
-    if let Err(e) = crate::standalone::patch_and_resume(child.id(), settings) {
-        crate::windows_diagnostics::record(&format!("Standalone PoC FAILED before resume: {e}"));
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(e);
-    }
     crate::windows_diagnostics::after_launch(child.id(), baseline);
     Ok(child)
 }
