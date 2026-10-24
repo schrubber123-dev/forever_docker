@@ -22,6 +22,7 @@ use windows::Win32::System::Threading::{
 #[link(name = "ntdll")]
 extern "system" {
     fn NtResumeProcess(process_handle: HANDLE) -> i32;
+    fn NtSuspendProcess(process_handle: HANDLE) -> i32;
 }
 
 // Stock Battle.net ConnectTo/ChangeProtocol RSA modulus prefix.
@@ -203,6 +204,46 @@ fn parse_server_key(settings: &Settings) -> Result<[u8; 32], String> {
     bytes.try_into().map_err(|_| "Server public key must contain exactly 32 bytes".to_string())
 }
 
+fn wait_for_main_image(handle: HANDLE) -> Result<usize, String> {
+    use std::time::{Duration, Instant};
+
+    // WoW x64 normally maps its main image at 0x140000000. The process is
+    // initially created suspended, so the image is not guaranteed to be fully
+    // committed yet. Arctium-compatible launchers briefly resume, wait for this
+    // mapping, suspend again, and only then patch the data slots.
+    const PREFERRED_BASE: usize = 0x140000000;
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    loop {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        let n = unsafe {
+            VirtualQueryEx(
+                handle,
+                Some(PREFERRED_BASE as *const c_void),
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if n != 0
+            && info.State == MEM_COMMIT
+            && info.Type == MEM_IMAGE
+            && info.RegionSize > 0x1000
+        {
+            crate::windows_diagnostics::record(&format!(
+                "Standalone PoC: main image mapped at 0x{:X}, first region size=0x{:X}",
+                info.AllocationBase as usize,
+                info.RegionSize
+            ));
+            return Ok(info.AllocationBase as usize);
+        }
+
+        if Instant::now() >= deadline {
+            return Err("Timed out waiting for the WowB main image to be mapped".into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Applies the minimal private-auth data patches before the suspended 70450
 /// process is allowed to execute, then resumes the whole process.
 ///
@@ -210,7 +251,29 @@ fn parse_server_key(settings: &Settings) -> Result<[u8; 32], String> {
 /// integrity checks, inject a DLL, or modify WowB.exe on disk.
 pub fn patch_and_resume(pid: u32, settings: &Settings) -> Result<(), String> {
     let process = open_process(pid)?;
-    crate::windows_diagnostics::record("Standalone PoC: suspended WowB opened; applying pre-auth data patches");
+    crate::windows_diagnostics::record(
+        "Standalone PoC: WowB created suspended; briefly resuming for PE image initialization"
+    );
+
+    let resumed = unsafe { NtResumeProcess(process.0) };
+    if resumed < 0 {
+        return Err(format!(
+            "Initial NtResumeProcess failed, NTSTATUS=0x{:08X}",
+            resumed as u32
+        ));
+    }
+
+    let image_base = wait_for_main_image(process.0)?;
+    let suspended = unsafe { NtSuspendProcess(process.0) };
+    if suspended < 0 {
+        return Err(format!(
+            "NtSuspendProcess after image initialization failed, NTSTATUS=0x{:08X}",
+            suspended as u32
+        ));
+    }
+    crate::windows_diagnostics::record(&format!(
+        "Standalone PoC: WowB re-suspended after image mapping at 0x{image_base:X}; applying pre-auth data patches"
+    ));
 
     patch_unique(process.0, "ConnectTo RSA", CONNECT_TO_PREFIX, TRINITY_RSA_MODULUS)?;
     let server_key = parse_server_key(settings)?;
@@ -218,9 +281,11 @@ pub fn patch_and_resume(pid: u32, settings: &Settings) -> Result<(), String> {
 
     let status = unsafe { NtResumeProcess(process.0) };
     if status < 0 {
-        return Err(format!("NtResumeProcess failed, NTSTATUS=0x{:08X}", status as u32));
+        return Err(format!("Final NtResumeProcess failed, NTSTATUS=0x{:08X}", status as u32));
     }
-    crate::windows_diagnostics::record("Standalone PoC: pre-auth patches verified; WowB resumed without -launcherlogin");
+    crate::windows_diagnostics::record(
+        "Standalone PoC: pre-auth patches verified; WowB resumed without -launcherlogin"
+    );
     Ok(())
 }
 
