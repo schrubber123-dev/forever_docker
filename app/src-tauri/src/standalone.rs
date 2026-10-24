@@ -204,15 +204,75 @@ fn parse_server_key(settings: &Settings) -> Result<[u8; 32], String> {
     bytes.try_into().map_err(|_| "Server public key must contain exactly 32 bytes".to_string())
 }
 
+fn scan_for_main_image(handle: HANDLE) -> Option<usize> {
+    // Match Arctium/wow-patcher's fallback strategy: find a MEM_IMAGE allocation
+    // whose AllocationBase starts with MZ and whose committed image extent is in
+    // the broad WoW x64 range. This also handles ASLR/non-preferred image bases.
+    const LOWER: usize = 30 * 1024 * 1024;
+    const UPPER: usize = 300 * 1024 * 1024;
+    const CEILING: usize = 0x0000_8000_0000_0000;
+
+    let mut address = 0x10000usize;
+    let mut current_base = 0usize;
+    let mut current_extent = 0usize;
+    let mut current_is_pe = false;
+
+    loop {
+        if address >= CEILING {
+            break;
+        }
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        let n = unsafe {
+            VirtualQueryEx(
+                handle,
+                Some(address as *const c_void),
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if n == 0 {
+            break;
+        }
+
+        let region_base = info.BaseAddress as usize;
+        let region_size = info.RegionSize;
+        let alloc_base = info.AllocationBase as usize;
+
+        if info.State == MEM_COMMIT && info.Type == MEM_IMAGE && alloc_base != 0 {
+            if alloc_base != current_base {
+                if current_is_pe && (LOWER..=UPPER).contains(&current_extent) {
+                    return Some(current_base);
+                }
+                current_base = alloc_base;
+                current_extent = 0;
+                current_is_pe = read(handle, alloc_base, 2).is_some_and(|b| b == b"MZ");
+            }
+            current_extent = current_extent.saturating_add(region_size);
+        } else if current_base != 0 && alloc_base != current_base {
+            if current_is_pe && (LOWER..=UPPER).contains(&current_extent) {
+                return Some(current_base);
+            }
+            current_base = 0;
+            current_extent = 0;
+            current_is_pe = false;
+        }
+
+        let next = region_base.saturating_add(region_size);
+        if next <= address {
+            break;
+        }
+        address = next;
+    }
+
+    (current_is_pe && (LOWER..=UPPER).contains(&current_extent)).then_some(current_base)
+}
+
 fn wait_for_main_image(handle: HANDLE) -> Result<usize, String> {
     use std::time::{Duration, Instant};
 
-    // WoW x64 normally maps its main image at 0x140000000. The process is
-    // initially created suspended, so the image is not guaranteed to be fully
-    // committed yet. Arctium-compatible launchers briefly resume, wait for this
-    // mapping, suspend again, and only then patch the data slots.
     const PREFERRED_BASE: usize = 0x140000000;
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut attempts = 0u32;
 
     loop {
         let mut info = MEMORY_BASIC_INFORMATION::default();
@@ -229,16 +289,38 @@ fn wait_for_main_image(handle: HANDLE) -> Result<usize, String> {
             && info.Type == MEM_IMAGE
             && info.RegionSize > 0x1000
         {
+            let base = info.AllocationBase as usize;
             crate::windows_diagnostics::record(&format!(
-                "Standalone PoC: main image mapped at 0x{:X}, first region size=0x{:X}",
-                info.AllocationBase as usize,
+                "Standalone PoC: main image found at preferred-base probe; allocationBase=0x{base:X}, firstRegion=0x{:X}",
                 info.RegionSize
             ));
-            return Ok(info.AllocationBase as usize);
+            return Ok(base);
         }
 
+        if let Some(base) = scan_for_main_image(handle) {
+            crate::windows_diagnostics::record(&format!(
+                "Standalone PoC: main image found by ASLR fallback scan at 0x{base:X}"
+            ));
+            return Ok(base);
+        }
+
+        attempts += 1;
+        if attempts % 40 == 0 {
+            crate::windows_diagnostics::record(&format!(
+                "Standalone PoC: still waiting for main image; preferred probe result={} state=0x{:X} type=0x{:X} allocationBase=0x{:X}",
+                n,
+                info.State.0,
+                info.Type.0,
+                info.AllocationBase as usize
+            ));
+        }
         if Instant::now() >= deadline {
-            return Err("Timed out waiting for the WowB main image to be mapped".into());
+            return Err(format!(
+                "Timed out waiting for the WowB main image to be mapped (preferred probe: result={n}, state=0x{:X}, type=0x{:X}, allocationBase=0x{:X})",
+                info.State.0,
+                info.Type.0,
+                info.AllocationBase as usize
+            ));
         }
         std::thread::sleep(Duration::from_millis(25));
     }
