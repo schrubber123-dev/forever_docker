@@ -41,7 +41,9 @@ jobs:
           $code = $LASTEXITCODE
           $lines | ForEach-Object { Write-Output $_ }
           if ($code -ne 0) {
-            $lines | Select-Object -Last 25 | ForEach-Object { Write-Output "::error title=API diagnostic build::$($_.ToString())" }
+            $errors = @($lines | Where-Object { $_.ToString() -match '(?i)error\s+(C|LNK)\d+|fatal error|CMake Error|unresolved external' })
+            if ($errors.Count -eq 0) { $errors = @($lines | Select-Object -Last 5) }
+            $errors | Select-Object -First 8 | ForEach-Object { Write-Output "::error title=API diagnostic build::$($_.ToString())" }
             exit $code
           }
           Write-Output '::notice title=API diagnostics::Build passed.'
