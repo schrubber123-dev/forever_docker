@@ -180,7 +180,7 @@ try {
         if (0L -notin $statuses -or @($statuses | Where-Object { $_ -in $refusedStatuses }).Count -eq 0) {
             throw 'SelfTest failed: decoded successful AND refused connect results are required.'
         }
-        Mark 'SELFTEST PASS: real loopback success/refusal and both decoded connect outcomes verified.' 
+        Mark 'SELFTEST PASS: real loopback success/refusal and both decoded connect outcomes verified.'
     }
 } catch {
     Mark "EXPORT/VALIDATION FAILED: $($_.Exception.Message)"

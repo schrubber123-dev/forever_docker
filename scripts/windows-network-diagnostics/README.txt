@@ -10,7 +10,7 @@ Windows-Netzwerkdiagnose fuer Forever 70450
 Der Collector aendert weder Spieldateien noch Agent-, Server- oder Netzwerkeinstellungen.
 Er startet zwei eigene, eindeutig benannte ETW-Sitzungen und stoppt nur diese.
 Er sammelt systemweite Winsock-/DNS-Metadaten (auch anderer Programme), keine
-Pakete, HTTP-Inhalte, Registrywerte, Passwoerter oder Prozessumgebungen.
+Pakete, HTTP-Inhalte, Registrywerte oder Prozessumgebungen.
 Andere Programme moeglichst schliessen. Die erzeugte ZIP vor Weitergabe pruefen.
 Die binaeren ETL-Dateien bleiben lokal; nur XML, Zusammenfassung, Kontroll- und
 Zeit/PID-Marker werden in die ZIP aufgenommen. Jede ETL ist auf 8 MiB begrenzt

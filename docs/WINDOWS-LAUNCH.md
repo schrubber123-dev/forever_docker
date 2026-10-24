@@ -185,7 +185,8 @@ native connect operation was attempted. To obtain the actual connect result,
 use the standalone helper in `scripts/windows-network-diagnostics/`:
 
 1. Download the `Forever-Network-Diagnostics` artifact from the **Windows network
-   diagnostics** workflow and extract it. Double-click `Start-Network-Diagnostics.cmd`.
+   diagnostics** workflow and extract it. Close WoW normally first, keeping the
+   normal launcher open. Double-click `Start-Network-Diagnostics.cmd`.
 2. Accept elevation for the tracing helper only. Press Play in the existing
    **normal, non-elevated launcher** when the helper says the trace is running.
 3. Let the capture finish. Send the ZIP it creates on the Desktop. Keep the raw
