@@ -280,6 +280,21 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
         let first = wait_for_client(child_pid);
         match first {
             Some(mem) => {
+                #[cfg(windows)]
+                match mem.apply_tls_cert_poc() {
+                    Ok(lines) => {
+                        for line in lines {
+                            crate::windows_diagnostics::record(&line);
+                            emit(&app, "log", line);
+                        }
+                    }
+                    Err(e) => {
+                        let line = format!("TLS cert PoC: {e}");
+                        crate::windows_diagnostics::record(&line);
+                        emit(&app, "log", line);
+                    }
+                }
+
                 emit(&app, "running", t("running"));
                 patcher.watch(
                     Box::new(mem),
