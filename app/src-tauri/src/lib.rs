@@ -230,7 +230,7 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     .map_err(|e| e.to_string())??;
     #[cfg(windows)]
     {
-        emit(app, "log", t("windows_launch_verified"));
+        emit(app, "log", "Standalone direct mode: portal config prepared; Battle.net registry auto-login is disabled for this test.");
         // Names only: inherited Agent launch context may affect startup. Do not log
         // values, which can contain credentials. Leave the environment unchanged.
         let mut names: Vec<String> = std::env::vars_os()
