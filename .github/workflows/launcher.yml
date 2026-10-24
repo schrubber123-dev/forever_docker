@@ -19,7 +19,7 @@ on:
         default: ""
   push:
     tags: ["v*"]
-    branches: [main]
+    branches: [main, standalone-70450-poc]
     paths:
       - "app/**"
       - ".github/workflows/launcher.yml"
