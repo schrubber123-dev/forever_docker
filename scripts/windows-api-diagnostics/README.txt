@@ -43,20 +43,20 @@ Wenn "DIAGNOSEFEHLER" erscheint, dessen Text und eine gegebenenfalls erzeugte
 Ergebnis-ZIP senden. Keine Speicherabbilder oder Clientdateien hochladen.
 Die Ladepruefung unterscheidet fehlgeschlagene Modulabfragen von einer erfolgreich
 geprueften, aber fehlenden DLL. Sie wiederholt kurzzeitig instabile Abfragen und
-schreibt Stufe/Windows-Fehlercode in markers.txt. Der Ladeaufruf erfasst den vollen
-x64-Modulhandle und GetLastError direkt im selben Ziel-Thread. Nur ein normal
-abgeschlossener, fehlgeschlagener LoadLibraryW-Aufruf liefert einen gueltigen
-Win32-Ladefehler. Der Thread-Rueckgabewert allein ist kein GetLastError.
-Die kleine Diagnosefunktion und ihre Win64-Unwind-Metadaten werden protokolliert;
-Registrierung und Entfernung werden vor Ausfuehrung bzw. Speicherfreigabe geprueft.
-Schutzrichtlinien werden nur abgefragt und nicht abgeschaltet. Ein vorhandenes
-socket-*.log kann trotz einer frueheren Ladepruefungs-Fehlermeldung nuetzlich sein.
+schreibt den nativen Loader-Status in markers.txt. Fuer den eigentlichen Ladeversuch
+wird LdrLoadDll ueber einen kleinen x64-Leaf-Adapter aufgerufen. Der Adapter erzeugt
+keinen eigenen Stack-Frame und benoetigt deshalb keine dynamische Unwind-Tabelle.
+LdrLoadDll liefert seinen NTSTATUS direkt als Thread-Ergebnis und schreibt den vollen
+x64-Modulhandle in einen separaten Ausgabespeicher. Der NTSTATUS wird zusaetzlich
+mit RtlNtStatusToDosError in einen Win32-Fehlercode uebersetzt. Schutzrichtlinien
+werden nur abgefragt und nicht abgeschaltet. Ein vorhandenes socket-*.log kann trotz
+einer Ladepruefungs-Fehlermeldung bereits nuetzlich sein.
 
 Quellcode: scripts/windows-api-diagnostics/ im Repository schrubber123-dev/forever_docker.
 Abhaengigkeit: MinHook v1.3.4, exakt Commit c3fcafdc10146beb5919319d0683e44e3c30d537.
 Lizenztexte werden mitgeliefert. diagnostic-build.txt nennt die genaue Quellrevision.
 Der Windows-Selbsttest injiziert ausschliesslich einen eigenen Testprozess und
 prueft echte Socketaufrufe, ConnectionRefused/InvalidSocket und Last-Error-Erhaltung,
-ausserdem den Ladefehler 126 bei einer absichtlich fehlenden eigenen DLL und die
-Win64-Unwind-Metadaten der Diagnosefunktion.
+ausserdem dass der native LdrLoadDll-Status einer absichtlich fehlenden eigenen DLL
+korrekt auf Win32-Fehler 126 (ERROR_MOD_NOT_FOUND) abgebildet wird.
 Er beweist keine Fehlerursache oder Kompatibilitaet mit dem eigentlichen Spiel.
