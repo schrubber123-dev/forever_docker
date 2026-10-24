@@ -6,6 +6,8 @@ mod dpapi;
 mod game;
 #[cfg(windows)]
 mod windows_diagnostics;
+#[cfg(windows)]
+mod standalone;
 mod i18n;
 #[cfg(target_os = "macos")]
 mod macos;
