@@ -11,14 +11,130 @@ configured game directory. It writes these values under the current Windows user
 | `GAME_ACCOUNT` | `REG_SZ` | NUL-terminated UTF-16, account name returned by REST (e.g. `WoW1`) |
 | `WEB_TOKEN` | `REG_BINARY` | Current-user DPAPI, UTF-8 ticket bytes without a trailing NUL, Battle.net entropy |
 
-Before starting the game, Windows now reads back all three values, verifies their
-types and exact bytes, and decrypts the stored ticket with the expected entropy.
-A failure stops launch with the affected value's name or DPAPI error. Success
-appears in the launcher's log, followed by inherited `BNET_*` variable names (an
-empty list means none were present). Values are never logged or changed.
-Neither encrypted nor plaintext tickets are logged.
-This verifies the launcher's user context; it does not prove that the game runs
-as that same user, consumes the ticket, or connects to the server.
+## Diagnostic build and log
+
+The diagnostic workflow runs on launcher changes pushed to `main`, or manually
+through Actions > Launcher > Run workflow with **version left empty**. It builds
+Windows only, runs native library tests, and uploads the `Forever-Launcher-Windows`
+artifact without publishing a release. The artifact contains the portable
+`forever-launcher.exe`, installer and `diagnostic-build.txt` identifying the exact
+commit. The same revision appears in each diagnostic log session header.
+
+On Windows, pressing **Play** opens/appends to:
+
+```text
+%APPDATA%\forever-launcher-app\windows-launch-diagnostics.log
+```
+
+Paste that path into Explorer or open it with:
+
+```powershell
+notepad "$env:APPDATA\forever-launcher-app\windows-launch-diagnostics.log"
+```
+
+The launcher's existing log panel also shows the resolved absolute log path.
+No console, developer tools or debug build is needed. Login alone does not write
+registry diagnostics: they are recorded on Play, after REST ticket retrieval.
+A failure to open the file is shown as a launch error. Session sections append,
+so copy the latest section starting at `=== Play session; revision=... ===`.
+
+For each registry value the file records the `RegQueryValueExW` status (0 means
+success), actual registry type (name and number), and byte length. REG_SZ lengths
+include the UTF-16 NUL terminator. It compares read-back bytes, checks DPAPI
+plaintext against the ticket, and records SUCCESS/FAILED/NOT RUN. If opening or
+writing the key fails, the file instead records that prerequisite failure; values
+not reached are not claimed as verified. It never records either form of the
+ticket, account values, password, REST responses or environment variable values.
+Inherited `BNET_*` **names only** are recorded even if REST preparation fails.
+This proves the launcher's user-context check, not the game's acceptance.
+
+Immediately before spawning WowB, a process snapshot reports already running
+`Agent.exe` and `WowB.exe` instances (PID and parent PID). After spawn it logs the
+new WowB PID, then observes appearances/disappearances for 60 seconds at 250ms
+intervals. An empty list means none observed; errors are explicit. This does not
+start/stop Agent or change its environment. A new Agent PID is an observation,
+not proof it was caused by WowB or a relaunch. Brief processes may be missed;
+Procmon supplies exact process-start evidence.
+
+## Short Windows test
+
+1. In Actions, open the Launcher run for the new diagnostic commit. Wait for
+   **build** to pass; **release** should be skipped. Download and extract its
+   `Forever-Launcher-Windows` artifact. Check `diagnostic-build.txt`, then run the
+   extracted `forever-launcher.exe` as your normal Windows user. Avoid an older
+   installed shortcut. Leave existing Agent state unchanged for the first test.
+2. Start the Procmon capture below before Login. Login, press Play once, wait at
+   least 65 seconds, then stop capture. Record the game's visible outcome.
+3. Copy the latest complete session from the diagnostic log. Confirm its revision
+   matches `diagnostic-build.txt`. Send that section and the selected Procmon rows
+   described below. Do not send registry exports, raw PML files, full Process
+   Start details/environment, or any token bytes.
+
+The known starting point remains: WowB successfully reads WEB_TOKEN and
+CONNECTION_STRING (`trinity.actual.battle.net:1119`, 62 UTF-16 bytes including NUL),
+but previously made no connection to the private server on TCP/1119. GAME_ACCOUNT
+consumption and game-context ticket acceptance remain unconfirmed.
+
+## Exact Procmon capture and display filters
+
+Run Procmon elevated if needed; keep the launcher/game non-elevated. Stop capture
+(Ctrl+E), reset filters (Ctrl+L > Reset), clear events (Ctrl+X). Enable Registry,
+Network and Process/Thread activity. Disable **Filter > Drop Filtered Events**
+so switching views later does not discard needed events. Disable **Options >
+Resolve Network Addresses** to keep port numbers numeric. Start capture (Ctrl+E)
+before Login/Play and stop after the wait. Keep the raw capture local: registry
+and process details may contain credentials.
+
+Apply these as **three separate views**, resetting filters between them. Each
+listed row is an Include filter. Procmon ORs Include rows on the same column and
+ANDs different columns; do not combine all three views in one filter set.
+
+**A. WowB registry reads**
+
+| Column | Relation | Value |
+|---|---|---|
+| Process Name | is | `WowB.exe` |
+| Operation | is | `RegOpenKey` |
+| Operation | is | `RegQueryValue` |
+| Path | begins with | `HKCU\Software\Blizzard Entertainment\Battle.net\Launch Options\WoW` |
+
+If your Procmon renders the observed key as `HKU\S-1-...` rather than `HKCU`,
+use that exact user SID prefix in the Path row. Record results for WEB_TOKEN,
+CONNECTION_STRING and GAME_ACCOUNT, including NAME NOT FOUND if observed.
+Copy Time of Day, Process Name, PID, Operation, Path, Result; manually add type
+and length only from Detail. Never copy WEB_TOKEN Data.
+
+**B. WowB/Agent process starts and exits**
+
+| Column | Relation | Value |
+|---|---|---|
+| Process Name | is | `WowB.exe` |
+| Process Name | is | `Agent.exe` |
+| Operation | is | `Process Start` |
+| Operation | is | `Process Exit` |
+
+Copy time, process name, PID, operation and parent PID. Copy only the WowB
+command line if it contains no credentials. Do not copy the full Detail field
+or environment. To inspect parent-side Process Create events too, use a separate
+view with **only** `Operation is Process Create Include`, then Find `WowB.exe`
+and `Agent.exe` in the child paths; a process-name filter would hide events whose
+parent has a different name (including the launcher).
+
+**C. TCP/1119 connections**
+
+| Column | Relation | Value |
+|---|---|---|
+| Process Name | is | `WowB.exe` |
+| Process Name | is | `Agent.exe` |
+| Operation | is | `TCP Connect` |
+| Operation | is | `TCP Reconnect` |
+| Path | ends with | `:1119` |
+
+Copy time, process name, PID, operation, path and result, or explicitly report
+**zero matching rows**. For an HTTPS comparison, replace the Path filter with
+`ends with :443` and send only connection metadata. Report whether TCP/1119
+reached `192.168.188.106`; do not equate unrelated Agent HTTPS activity with a
+proven cause of missing Battle.net traffic.
 
 ## Upstream comparison
 
@@ -38,28 +154,9 @@ that an unmodified direct launch has equivalent endpoint selection. Its patches
 must not be copied blindly: the reported client already reads our registry path,
 and the target build must first be inspected for the relevant startup behavior.
 
-## Next Windows capture
-
-The reported successful REST login, trusted certificate, hosts resolution and
-reachable port 1119 do not explain a client that never attempts that connection.
-External HTTPS activity alone also does not identify the endpoint-selection branch
-(Agent may independently access content/version services).
-
-1. Run the diagnostic launcher as the same non-elevated user as the game. Record
-   whether the launch-options verification succeeds. Do not share ticket contents.
-2. In Procmon, capture `WowB.exe` and `Agent.exe` process creation (including parent,
-   command line and user), registry reads and TCP connections from before Play.
-   Record `RegQueryValue` results and value types/lengths for the three values.
-   Redact all `WEB_TOKEN` data before sharing a trace or screenshot.
-3. Record the actual child's command line, whether it restarts through Agent, and
-   any `BNET_*` variable **names only** inherited from the launcher's parent.
-4. Correlate the game's startup/connection logs with that capture, redacting
-   credentials and tickets. A successful read alone does not prove successful
-   DPAPI decryption in the game's context or acceptance of the endpoint.
-
-The cause of the missing 1119 connection is still unconfirmed. No Agent bypass,
-extra registry values, protocol changes, build changes or argument changes are
-implemented on the basis of this comparison.
+No Agent bypass, extra region/product registry values, protocol changes, build
+changes or launch-argument changes are implemented. Await the runtime results
+before choosing a behavioral fix.
 
 ## Tests
 

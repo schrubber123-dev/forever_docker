@@ -39,12 +39,17 @@ pub fn write_wtf(settings: &Settings) -> Result<(), String> {
 pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, game_account: &str) -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::System::Registry::*;
-    let blob = crate::dpapi::protect(ticket.as_bytes())?;
+    let blob = crate::dpapi::protect(ticket.as_bytes()).map_err(|e| {
+        crate::windows_diagnostics::record("WEB_TOKEN DPAPI encryption FAILED"); e
+    })?;
     unsafe {
         let mut key = HKEY::default();
         RegCreateKeyExW(HKEY_CURRENT_USER, &HSTRING::from(LAUNCH_OPTIONS), 0, None, REG_OPTION_NON_VOLATILE, KEY_WRITE | KEY_QUERY_VALUE, None, &mut key, None)
             .ok()
-            .map_err(|e| tf("registry", &[&e]))?;
+            .map_err(|e| {
+                crate::windows_diagnostics::record(&format!("Launch Options registry open FAILED: {e}"));
+                tf("registry", &[&e])
+            })?;
         let set_str = |name: &str, value: &str| {
             let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
             let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
@@ -53,26 +58,43 @@ pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, ga
         let r = set_str("CONNECTION_STRING", portal)
             .and_then(|_| set_str("GAME_ACCOUNT", game_account))
             .and_then(|_| RegSetValueExW(key, &HSTRING::from("WEB_TOKEN"), 0, REG_BINARY, Some(&blob)).ok());
-        let result = r.map_err(|e| tf("registry", &[&e])).and_then(|_| {
+        let result = r.map_err(|e| {
+            crate::windows_diagnostics::record(&format!("Launch Options registry write FAILED: {e}"));
+            tf("registry", &[&e])
+        }).and_then(|_| {
             // Read back through the same registry API as the client. Never include ticket bytes
             // (encrypted or plaintext) in errors or logs.
             let read = |name: &str, expected_type, expected: &[u8]| -> Result<Vec<u8>, String> {
                 let mut kind = REG_VALUE_TYPE::default();
                 let mut bytes = vec![0u8; expected.len()];
                 let mut size = bytes.len() as u32;
-                RegQueryValueExW(key, &HSTRING::from(name), None, Some(&mut kind), Some(bytes.as_mut_ptr()), Some(&mut size))
-                    .ok().map_err(|e| format!("Launch Options/{name} read-back failed: {e}"))?;
+                let status = RegQueryValueExW(key, &HSTRING::from(name), None, Some(&mut kind), Some(bytes.as_mut_ptr()), Some(&mut size));
+                let type_name = match kind { REG_SZ => "REG_SZ", REG_BINARY => "REG_BINARY", _ => "other" };
+                crate::windows_diagnostics::record(&format!("{name} read-back: status={} type={type_name}({}) length_bytes={size}", status.0, kind.0));
+                status.ok().map_err(|e| format!("Launch Options/{name} read-back failed: {e}"))?;
                 if kind != expected_type || size as usize != expected.len() || bytes != expected {
+                    crate::windows_diagnostics::record(&format!("{name} read-back comparison FAILED"));
                     return Err(format!("Launch Options/{name} read-back type or data mismatch"));
                 }
                 Ok(bytes)
             };
+            let mut errors = Vec::new();
             for (name, value) in [("CONNECTION_STRING", portal), ("GAME_ACCOUNT", game_account)] {
                 let bytes: Vec<u8> = value.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
-                read(name, REG_SZ, &bytes)?;
+                if let Err(e) = read(name, REG_SZ, &bytes) { errors.push(e); }
             }
-            let stored = read("WEB_TOKEN", REG_BINARY, &blob)?;
-            crate::dpapi::verify(&stored, ticket.as_bytes())
+            match read("WEB_TOKEN", REG_BINARY, &blob) {
+                Ok(stored) => {
+                    let result = crate::dpapi::verify(&stored, ticket.as_bytes());
+                    crate::windows_diagnostics::record(if result.is_ok() { "WEB_TOKEN DPAPI decrypt verification SUCCESS" } else { "WEB_TOKEN DPAPI decrypt verification FAILED" });
+                    if let Err(e) = result { errors.push(e); }
+                }
+                Err(e) => {
+                    crate::windows_diagnostics::record("WEB_TOKEN DPAPI decrypt verification NOT RUN: registry read-back failed");
+                    errors.push(e);
+                }
+            }
+            if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
         });
         let _ = RegCloseKey(key);
         result
@@ -106,11 +128,14 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
 
 #[cfg(windows)]
 pub fn spawn(settings: &Settings) -> Result<Child, String> {
-    Command::new(settings.exe())
+    let baseline = crate::windows_diagnostics::before_launch();
+    let child = Command::new(settings.exe())
         .args(["-launcherlogin", "-config", WTF_NAME])
         .current_dir(&settings.game_dir)
         .spawn()
-        .map_err(|e| tf("launch_failed", &[&"WowB.exe", &e]))
+        .map_err(|e| tf("launch_failed", &[&"WowB.exe", &e]))?;
+    crate::windows_diagnostics::after_launch(child.id(), baseline);
+    Ok(child)
 }
 
 #[cfg(target_os = "linux")]

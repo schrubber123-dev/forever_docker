@@ -4,6 +4,8 @@ mod config;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod dpapi;
 mod game;
+#[cfg(windows)]
+mod windows_diagnostics;
 mod i18n;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -173,8 +175,18 @@ async fn play(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> 
     if state.playing.swap(true, Ordering::SeqCst) {
         return Err(t("already_running").into());
     }
+    #[cfg(windows)]
+    {
+        let path = match windows_diagnostics::begin() {
+            Ok(path) => path,
+            Err(e) => { state.playing.store(false, Ordering::SeqCst); return Err(e); }
+        };
+        emit(&app, "log", tf("windows_diagnostic_path", &[&path.display()]));
+    }
     let settings = state.settings.lock().unwrap().clone();
     let result = start(&app, settings).await;
+    #[cfg(windows)]
+    windows_diagnostics::record(if result.is_ok() { "Play preparation/spawn returned OK" } else { "Play preparation/spawn FAILED; see launcher UI for error (details omitted here to protect credentials)" });
     if result.is_err() {
         state.playing.store(false, Ordering::SeqCst);
     }
