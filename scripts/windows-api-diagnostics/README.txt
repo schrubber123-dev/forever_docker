@@ -39,6 +39,12 @@ Die ZIP enthaelt nur socket-<PID>.log und markers.txt. Die diagnostische DLL sow
 sonstige Dateien im lokalen Ausgabeordner werden nicht in die Ergebnis-ZIP gepackt.
 Wenn "DIAGNOSEFEHLER" erscheint, dessen Text und eine gegebenenfalls erzeugte
 Ergebnis-ZIP senden. Keine Speicherabbilder oder Clientdateien hochladen.
+Die Ladepruefung unterscheidet fehlgeschlagene Modulabfragen von einer erfolgreich
+geprueften, aber fehlenden DLL. Sie wiederholt kurzzeitig instabile Abfragen und
+schreibt Stufe/Windows-Fehlercode sowie den Load-Thread-Rueckgabewert in markers.txt.
+Dieser Rueckgabewert ist kein remote GetLastError. Schutzrichtlinien werden nur
+abgefragt und nicht abgeschaltet. Ein vorhandenes socket-*.log kann trotz einer
+frueheren Ladepruefungs-Fehlermeldung bereits nuetzlich sein.
 
 Quellcode: scripts/windows-api-diagnostics/ im Repository schrubber123-dev/forever_docker.
 Abhaengigkeit: MinHook v1.3.4, exakt Commit c3fcafdc10146beb5919319d0683e44e3c30d537.

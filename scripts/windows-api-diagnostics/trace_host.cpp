@@ -144,15 +144,61 @@ void ValidateWow(HANDLE process) {
     }
     if (!match) throw std::runtime_error("FileVersion must identify exactly 1.60.1.70450; no DLL was injected.");
 }
-struct RemoteModule { uintptr_t base=0; DWORD size=0; };
+struct RemoteModule {
+    uintptr_t base=0;
+    DWORD size=0;
+    DWORD lookupError=ERROR_SUCCESS;
+    unsigned attempts=0;
+    bool enumerated=false;
+    const char* stage="not-started";
+};
 RemoteModule FindModule(DWORD pid, const std::wstring& name, bool fullPath=false) {
-    Handle snap(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,pid));
-    if (snap.h==INVALID_HANDLE_VALUE) return {};
-    MODULEENTRY32W m{};m.dwSize=sizeof(m);
-    if (Module32FirstW(snap,&m)) do {
-        if (_wcsicmp(fullPath?m.szExePath:m.szModule,name.c_str())==0) return {reinterpret_cast<uintptr_t>(m.modBaseAddr),m.modBaseSize};
-    } while (Module32NextW(snap,&m));
-    return {};
+    // Toolhelp requires retrying ERROR_BAD_LENGTH while the target loader changes.
+    // Never report a failed inspection as a successfully inspected absent module.
+    RemoteModule result;
+    for(unsigned attempt=1;attempt<=40;++attempt) {
+        result.attempts=attempt;
+        result.stage="CreateToolhelp32Snapshot";
+        Handle snap(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,pid));
+        if(snap.h==INVALID_HANDLE_VALUE) {
+            result.lookupError=GetLastError();
+        } else {
+            MODULEENTRY32W m{};m.dwSize=sizeof(m);
+            result.stage="Module32FirstW";
+            if(Module32FirstW(snap,&m)) {
+                do {
+                    if(_wcsicmp(fullPath?m.szExePath:m.szModule,name.c_str())==0)
+                        return {reinterpret_cast<uintptr_t>(m.modBaseAddr),m.modBaseSize,ERROR_SUCCESS,attempt,true,"found"};
+                } while(Module32NextW(snap,&m));
+                result.lookupError=GetLastError();result.stage="Module32NextW";
+            } else { result.lookupError=GetLastError(); }
+            if(result.lookupError==ERROR_NO_MORE_FILES) {
+                result.lookupError=ERROR_SUCCESS;result.enumerated=true;return result;
+            }
+        }
+        if(result.lookupError!=ERROR_BAD_LENGTH)return result;
+        Sleep(50);
+    }
+    return result;
+}
+std::string LookupText(const RemoteModule& m) {
+    std::ostringstream out;out<<"moduleBase=0x"<<std::hex<<m.base<<std::dec
+        <<" inspectionError="<<m.lookupError<<" attempts="<<m.attempts<<" stage="<<m.stage<<" enumerationComplete="<<m.enumerated;
+    return out.str();
+}
+void LoaderPolicies(HANDLE process,const fs::path& folder) {
+    PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY signatures{};
+    if(GetProcessMitigationPolicy(process,ProcessSignaturePolicy,&signatures,sizeof(signatures)))
+        Mark(folder,"Read-only signature policy: MicrosoftSignedOnly="+std::to_string(signatures.MicrosoftSignedOnly)+" StoreSignedOnly="+std::to_string(signatures.StoreSignedOnly));
+    else Mark(folder,"Signature-policy query unavailable, Win32="+std::to_string(GetLastError()));
+    PROCESS_MITIGATION_DYNAMIC_CODE_POLICY dynamic{};
+    if(GetProcessMitigationPolicy(process,ProcessDynamicCodePolicy,&dynamic,sizeof(dynamic)))
+        Mark(folder,"Read-only dynamic-code policy: ProhibitDynamicCode="+std::to_string(dynamic.ProhibitDynamicCode));
+    else Mark(folder,"Dynamic-code-policy query unavailable, Win32="+std::to_string(GetLastError()));
+    PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg{};
+    if(GetProcessMitigationPolicy(process,ProcessControlFlowGuardPolicy,&cfg,sizeof(cfg)))
+        Mark(folder,"Read-only CFG policy: enabled="+std::to_string(cfg.EnableControlFlowGuard)+" strict="+std::to_string(cfg.StrictMode));
+    else Mark(folder,"CFG-policy query unavailable, Win32="+std::to_string(GetLastError()));
 }
 uintptr_t RemoteLoadLibrary(DWORD pid) {
     auto local=reinterpret_cast<uintptr_t>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW"));
@@ -163,10 +209,11 @@ uintptr_t RemoteLoadLibrary(DWORD pid) {
     if (!GetModuleFileNameW(owner,ownerPath,32768)) WinFail("GetModuleFileNameW LoadLibrary owner");
     RemoteModule remote=FindModule(pid,fs::path(ownerPath).filename().wstring());
     uintptr_t rva=local-reinterpret_cast<uintptr_t>(owner);
-    if (!remote.base || rva>=remote.size) throw std::runtime_error("Cannot map LoadLibraryW into target system module.");
+    if (!remote.base || rva>=remote.size) throw std::runtime_error("Cannot map LoadLibraryW into target system module; "+LookupText(remote));
     return remote.base+rva;
 }
-void Inject(HANDLE process,DWORD pid,const fs::path& dll) {
+void Inject(HANDLE process,DWORD pid,const fs::path& dll,const fs::path& folder) {
+    LoaderPolicies(process,folder);
     size_t bytes=(dll.wstring().size()+1)*sizeof(wchar_t);
     void* remote=VirtualAllocEx(process,nullptr,bytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
     if (!remote) WinFail("VirtualAllocEx");
@@ -179,8 +226,25 @@ void Inject(HANDLE process,DWORD pid,const fs::path& dll) {
     DWORD wait=WaitForSingleObject(thread,15000);
     // If a remote call is still running, leave its argument alive until process exit.
     if (wait!=WAIT_OBJECT_0) throw std::runtime_error("DLL load timed out; remote argument retained safely. Close WoW normally before retrying.");
+    DWORD loadExit=0;
+    if(!GetExitCodeThread(thread,&loadExit)) { VirtualFreeEx(process,remote,0,MEM_RELEASE);WinFail("GetExitCodeThread DLL load"); }
     VirtualFreeEx(process,remote,0,MEM_RELEASE);
-    if (!FindModule(pid,dll.wstring(),true).base) throw std::runtime_error("Diagnostic DLL was not loaded by target.");
+    std::ostringstream code;code<<"Load thread completed; low32Exit=0x"<<std::hex<<loadExit<<" (not a full x64 HMODULE or remote GetLastError)";
+    Mark(folder,code.str());
+    RemoteModule loaded=FindModule(pid,dll.wstring(),true);
+    // Do not inject a second copy. A successful but stale snapshot may settle shortly.
+    for(unsigned poll=0;!loaded.base&&!loaded.lookupError&&poll<20;++poll) {
+        if(WaitForSingleObject(process,0)==WAIT_OBJECT_0)break;
+        Sleep(50);loaded=FindModule(pid,dll.wstring(),true);
+    }
+    Mark(folder,"Load verification: "+LookupText(loaded));
+    if(!loaded.base) {
+        DWORD exitCode=0;
+        if(GetExitCodeProcess(process,&exitCode)) Mark(folder,"Target process state="+std::to_string(exitCode)+" (259 means still active)");
+        if(loaded.lookupError)
+            throw std::runtime_error("Diagnostic module inspection failed; "+LookupText(loaded)+". This does not prove DLL rejection.");
+        throw std::runtime_error("Diagnostic module absent after successful inspection; "+code.str()+". Remote loader error is not available from this thread result.");
+    }
 }
 void Stop(HANDLE process,DWORD pid,const fs::path& dll) {
     if (WaitForSingleObject(process,0)==WAIT_OBJECT_0) return;
@@ -287,7 +351,7 @@ int wmain(int argc,wchar_t** argv) {
     bool self=argc>=2&&std::wstring(argv[1])==L"--self-test";
     fs::path root;
     fs::path folder;fs::path dll;fs::path log;DWORD targetPid=0;Handle process;Handle childThread;Handle gate;Handle doneGate;Handle finishGate;
-    bool injected=false;int result=0;fs::path targetImage;std::string originalHash;
+    int result=0;fs::path targetImage;std::string originalHash;
     try {
         root=self&&argc==3?fs::path(argv[2]):(argc==3&&std::wstring(argv[1])==L"--output-root"?fs::path(argv[2]):Desktop());
         SID_IDENTIFIER_AUTHORITY authority=SECURITY_NT_AUTHORITY; PSID admins=nullptr; BOOL admin=FALSE;
@@ -305,6 +369,12 @@ int wmain(int argc,wchar_t** argv) {
         fs::copy_file(ModulePath().parent_path()/L"ForeverSocketTrace.dll",dll,fs::copy_options::none);
         Mark(folder,std::string("collector_pid=")+std::to_string(GetCurrentProcessId())+" SelfTest="+(self?"True":"False"));
         if(self){
+            auto present=FindModule(GetCurrentProcessId(),L"kernel32.dll");
+            auto absent=FindModule(GetCurrentProcessId(),L"Forever-Definitely-Absent-Module.dll");
+            auto invalid=FindModule(0xFFFFFFFF,L"kernel32.dll");
+            if(!present.base||present.lookupError||absent.base||absent.lookupError||!absent.enumerated||invalid.base||!invalid.lookupError||invalid.enumerated)
+                throw std::runtime_error("Self-test failed to distinguish module presence, absence and inspection failure.");
+            Mark(folder,"SELFTEST module inspection distinguishes presence, absence and native lookup errors");
             std::wstring name=L"Local\\ForeverSocketTest-"+Unique();gate.h=CreateEventW(nullptr,TRUE,FALSE,name.c_str());if(!gate.h)WinFail("CreateEventW");
             std::wstring doneName=name+L"-Done",finishName=name+L"-Finish";
             doneGate.h=CreateEventW(nullptr,TRUE,FALSE,doneName.c_str());finishGate.h=CreateEventW(nullptr,TRUE,FALSE,finishName.c_str());
@@ -330,7 +400,7 @@ int wmain(int argc,wchar_t** argv) {
         fs::copy_file(targetImage,backup,fs::copy_options::none);
         if(FileSha256(backup)!=originalHash)throw std::runtime_error("Original-file backup SHA256 mismatch; no injection performed.");
         Mark(folder,"Clean original-file backup verified locally; original-backup is excluded from upload ZIP");
-        Inject(process,targetPid,dll);injected=true;Ready(log,process);Mark(folder,"TRACE_READY confirmed");
+        Inject(process,targetPid,dll,folder);Ready(log,process);Mark(folder,"TRACE_READY confirmed");
         if(self){
             if(!SetEvent(gate))WinFail("SetEvent self-test");
             HANDLE phases[]={doneGate.h,process.h};
@@ -357,7 +427,14 @@ int wmain(int argc,wchar_t** argv) {
         Zip(folder,log);std::wcout<<L"ZIP erstellt: "<<folder.wstring()<<L".zip\n"<<std::flush;
     }catch(const std::exception& e){
         result=1;std::cerr<<"DIAGNOSEFEHLER: "<<e.what()<<"\n";
-        if(injected&&process.h){try{Stop(process,targetPid,dll);}catch(const std::exception& stop){std::cerr<<"Stop: "<<stop.what()<<"\n";}}
+        if(process.h&&!dll.empty()){
+            // Loading can succeed even when later verification fails. Do not reload it.
+            try {
+                auto loaded=FindModule(targetPid,dll.wstring(),true);
+                if(loaded.base)Stop(process,targetPid,dll);
+                else if(loaded.lookupError)std::cerr<<"Cleanup could not inspect module: "<<LookupText(loaded)<<"\n";
+            }catch(const std::exception& stop){std::cerr<<"Stop: "<<stop.what()<<"\n";}
+        }
         if(self){if(gate.h)SetEvent(gate);if(finishGate.h)SetEvent(finishGate);if(process.h)WaitForSingleObject(process,5000);}
         if(!folder.empty()){try{Mark(folder,std::string("FAILED: ")+e.what());if(!log.empty())Zip(folder,log);}catch(...){}std::wcout<<L"Dateien: "<<folder<<L"\n";}
         if(self)std::cerr<<"::error title=Native API diagnostic self-test failed::"<<e.what()<<"\n";

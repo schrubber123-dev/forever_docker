@@ -284,6 +284,29 @@ It must verify successful/refused socket calls, invalid-socket errors, metadata
 capture, original error behavior, live hook restoration, and ZIP export before
 publishing the diagnostic artifact. This is not a game-readiness claim.
 
+### Diagnostic-loader verification
+
+The user's first native diagnostic attempt reported `Diagnostic DLL was not
+loaded by target`, before `TRACE_READY`. That message alone does not distinguish
+loader rejection from failed module inspection. The original helper performed
+one Toolhelp snapshot and collapsed snapshot/enumeration errors into absence.
+[Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-createtoolhelp32snapshot)
+that module snapshots must retry `ERROR_BAD_LENGTH` and can be unstable during
+target startup.
+
+The corrected helper retries that specific transient error with a bound,
+separately reports inspection stage/error versus successful absence, polls
+presence without loading another copy, and records the load thread's exit DWORD.
+That DWORD is only the low 32 bits of a potential x64 module handle, not the
+remote thread's Win32 last-error code. Read-only mitigation queries are recorded;
+no process protection is disabled. Cleanup also checks for an actually loaded
+module when verification failed. Windows tests distinguish module presence,
+absence and lookup failure in addition to testing the successful injection path.
+
+If an old failed attempt produced `socket-*.log`, it may already contain useful
+data despite the verification error. Close WoW normally and collect only that
+file and `markers.txt`; never upload the local original backup or the DLL.
+
 ## Earlier compilation checks
 
 Run `cargo test --locked --lib` in `app/src-tauri` with `FOREVER_CA_CERT` set to a
