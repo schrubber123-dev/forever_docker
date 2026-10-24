@@ -212,6 +212,18 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())??;
+    #[cfg(windows)]
+    {
+        emit(app, "log", t("windows_launch_verified"));
+        // Names only: inherited Agent launch context may affect startup. Do not log
+        // values, which can contain credentials. Leave the environment unchanged.
+        let mut names: Vec<String> = std::env::vars_os()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .filter(|name| name.to_ascii_uppercase().starts_with("BNET_"))
+            .collect();
+        names.sort();
+        emit(app, "log", tf("windows_bnet_context", &[&names.join(", ")]));
+    }
     launch(app, settings).await
 }
 

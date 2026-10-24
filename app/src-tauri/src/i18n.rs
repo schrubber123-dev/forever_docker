@@ -107,6 +107,8 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("umu_not_found", ["umu-run est introuvable (paquet umu-launcher)", "umu-run not found (umu-launcher package)", "no se encontró umu-run (paquete umu-launcher)", "umu-run não encontrado (pacote umu-launcher)"]),
     ("proton_not_found", ["Proton introuvable : {}", "Proton not found: {}", "Proton no encontrado: {}", "Proton não encontrado: {}"]),
     ("command_failed", ["{} a échoué : {}", "{} failed: {}", "{} falló: {}", "{} falhou: {}"]),
+    ("windows_launch_verified", ["Options Windows vérifiées : CONNECTION_STRING et GAME_ACCOUNT (REG_SZ), WEB_TOKEN (REG_BINARY, déchiffrement DPAPI réussi).", "Windows launch options verified: CONNECTION_STRING and GAME_ACCOUNT (REG_SZ), WEB_TOKEN (REG_BINARY, DPAPI decryption successful).", "Opciones de Windows verificadas: CONNECTION_STRING y GAME_ACCOUNT (REG_SZ), WEB_TOKEN (REG_BINARY, descifrado DPAPI correcto).", "Opções do Windows verificadas: CONNECTION_STRING e GAME_ACCOUNT (REG_SZ), WEB_TOKEN (REG_BINARY, descriptografia DPAPI bem-sucedida)."]),
+    ("windows_bnet_context", ["Variables BNET_* héritées (noms uniquement) : [{}]", "Inherited BNET_* variables (names only): [{}]", "Variables BNET_* heredadas (solo nombres): [{}]", "Variáveis BNET_* herdadas (somente nomes): [{}]"]),
     // key patcher (journal)
     ("bad_public_key", ["clé publique du serveur invalide", "invalid server public key", "clave pública del servidor no válida", "chave pública do servidor inválida"]),
     ("bad_region_group", ["groupe de région invalide (2-12, sauf 9)", "invalid region group (2-12, except 9)", "grupo de región no válido (2-12, excepto 9)", "grupo de região inválido (2-12, exceto 9)"]),

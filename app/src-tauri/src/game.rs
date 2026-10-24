@@ -42,7 +42,7 @@ pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, ga
     let blob = crate::dpapi::protect(ticket.as_bytes())?;
     unsafe {
         let mut key = HKEY::default();
-        RegCreateKeyExW(HKEY_CURRENT_USER, &HSTRING::from(LAUNCH_OPTIONS), 0, None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None)
+        RegCreateKeyExW(HKEY_CURRENT_USER, &HSTRING::from(LAUNCH_OPTIONS), 0, None, REG_OPTION_NON_VOLATILE, KEY_WRITE | KEY_QUERY_VALUE, None, &mut key, None)
             .ok()
             .map_err(|e| tf("registry", &[&e]))?;
         let set_str = |name: &str, value: &str| {
@@ -53,8 +53,29 @@ pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, ga
         let r = set_str("CONNECTION_STRING", portal)
             .and_then(|_| set_str("GAME_ACCOUNT", game_account))
             .and_then(|_| RegSetValueExW(key, &HSTRING::from("WEB_TOKEN"), 0, REG_BINARY, Some(&blob)).ok());
+        let result = r.map_err(|e| tf("registry", &[&e])).and_then(|_| {
+            // Read back through the same registry API as the client. Never include ticket bytes
+            // (encrypted or plaintext) in errors or logs.
+            let read = |name: &str, expected_type, expected: &[u8]| -> Result<Vec<u8>, String> {
+                let mut kind = REG_VALUE_TYPE::default();
+                let mut bytes = vec![0u8; expected.len()];
+                let mut size = bytes.len() as u32;
+                RegQueryValueExW(key, &HSTRING::from(name), None, Some(&mut kind), Some(bytes.as_mut_ptr()), Some(&mut size))
+                    .ok().map_err(|e| format!("Launch Options/{name} read-back failed: {e}"))?;
+                if kind != expected_type || size as usize != expected.len() || bytes != expected {
+                    return Err(format!("Launch Options/{name} read-back type or data mismatch"));
+                }
+                Ok(bytes)
+            };
+            for (name, value) in [("CONNECTION_STRING", portal), ("GAME_ACCOUNT", game_account)] {
+                let bytes: Vec<u8> = value.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
+                read(name, REG_SZ, &bytes)?;
+            }
+            let stored = read("WEB_TOKEN", REG_BINARY, &blob)?;
+            crate::dpapi::verify(&stored, ticket.as_bytes())
+        });
         let _ = RegCloseKey(key);
-        r.map_err(|e| tf("registry", &[&e]))
+        result
     }
 }
 

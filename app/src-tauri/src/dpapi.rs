@@ -23,6 +23,35 @@ pub fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Verify a stored ticket in the current Windows user context without exposing it.
+#[cfg(windows)]
+pub fn verify(blob: &[u8], expected: &[u8]) -> Result<(), String> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB { cbData: blob.len() as u32, pbData: blob.as_ptr() as *mut u8 };
+        let entropy = CRYPT_INTEGER_BLOB { cbData: WEB_TOKEN_ENTROPY.len() as u32, pbData: WEB_TOKEN_ENTROPY.as_ptr() as *mut u8 };
+        let mut out = CRYPT_INTEGER_BLOB::default();
+        CryptUnprotectData(&input, None, Some(&entropy), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+            .map_err(|e| format!("WEB_TOKEN DPAPI verification failed: {e}"))?;
+        let matches = std::slice::from_raw_parts(out.pbData, out.cbData as usize) == expected;
+        let _ = LocalFree(HLOCAL(out.pbData as _));
+        if matches { Ok(()) } else { Err("WEB_TOKEN DPAPI plaintext mismatch".into()) }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    #[test]
+    fn ticket_round_trip_in_current_user_context() {
+        let ticket = b"TC-test-ticket";
+        let blob = super::protect(ticket).unwrap();
+        super::verify(&blob, ticket).unwrap();
+        assert!(super::verify(&blob, b"different-ticket").is_err());
+        assert!(super::verify(b"invalid DPAPI blob", ticket).is_err());
+    }
+}
+
 #[cfg(not(windows))]
 pub mod wine {
     #[cfg(test)]
