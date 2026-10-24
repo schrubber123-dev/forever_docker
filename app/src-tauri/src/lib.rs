@@ -281,16 +281,32 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
         match first {
             Some(mem) => {
                 #[cfg(windows)]
-                match mem.apply_tls_cert_poc() {
-                    Ok(lines) => {
-                        for line in lines {
-                            crate::windows_diagnostics::record(&line);
-                            emit(&app, "log", line);
-                        }
-                    }
-                    Err(e) => {
-                        let line = format!("TLS cert PoC: {e}");
-                        crate::windows_diagnostics::record(&line);
+                {
+                    use patcher::Memory;
+                    let tls_pid = mem.pid();
+                    let tls_app = app.clone();
+                    if let Some(tls_mem) = patcher::ProcessMemory::open(tls_pid) {
+                        let armed = "TLS cert PoC: watcher armed for 120s; start the manual login now";
+                        crate::windows_diagnostics::record(armed);
+                        emit(&app, "log", armed);
+                        std::thread::spawn(move || {
+                            match tls_mem.apply_tls_cert_poc() {
+                                Ok(lines) => {
+                                    for line in lines {
+                                        crate::windows_diagnostics::record(&line);
+                                        emit(&tls_app, "log", line);
+                                    }
+                                }
+                                Err(e) => {
+                                    let line = format!("TLS cert PoC: {e}");
+                                    crate::windows_diagnostics::record(&line);
+                                    emit(&tls_app, "log", line);
+                                }
+                            }
+                        });
+                    } else {
+                        let line = "TLS cert PoC: could not open a second WowB handle for the watcher";
+                        crate::windows_diagnostics::record(line);
                         emit(&app, "log", line);
                     }
                 }
