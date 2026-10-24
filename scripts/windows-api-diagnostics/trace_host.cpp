@@ -324,6 +324,12 @@ int wmain(int argc,wchar_t** argv) {
         }
         log=folder/(L"socket-"+std::to_wstring(targetPid)+L".log");Mark(folder,"target_pid="+std::to_string(targetPid));
         targetImage=ImagePath(process);originalHash=FileSha256(targetImage);Mark(folder,"Original target-file SHA256="+originalHash);
+        fs::path backupDir=folder/L"original-backup";
+        fs::create_directory(backupDir);
+        fs::path backup=backupDir/targetImage.filename();
+        fs::copy_file(targetImage,backup,fs::copy_options::none);
+        if(FileSha256(backup)!=originalHash)throw std::runtime_error("Original-file backup SHA256 mismatch; no injection performed.");
+        Mark(folder,"Clean original-file backup verified locally; original-backup is excluded from upload ZIP");
         Inject(process,targetPid,dll);injected=true;Ready(log,process);Mark(folder,"TRACE_READY confirmed");
         if(self){
             if(!SetEvent(gate))WinFail("SetEvent self-test");

@@ -17,7 +17,9 @@ Prozessumgebungen oder Registrywerte werden nicht aufgezeichnet.
 Dies ist KEIN Login-/Agent-Bypass. Es gibt keinen Versions- oder Produktstatus-Patch.
 Der Agent wird nicht injiziert, gestartet oder beendet. Die Spiel-EXE wird nur
 versionsgeprueft und gehasht; ihre Datei wird nicht beschrieben. Der Original-Hash
-wird vor/nach der Aufzeichnung verglichen. Kein Blizzard-Programm wird mitgeliefert.
+wird vor/nach der Aufzeichnung verglichen. Im lokalen Ausgabeordner liegt zudem
+eine hashgepruefte Sicherung unter original-backup; sie wird NIE in die
+Ergebnis-ZIP aufgenommen. Kein Blizzard-Programm wird mitgeliefert.
 
 Nur der x64-Client mit FileVersion 1.60.1.70450 wird im normalen Modus akzeptiert.
 Der Collector wartet auf einen neuen WowB-Prozess; bitte keine zweite Instanz starten.

@@ -268,7 +268,9 @@ more useful than additional ordinary Agent or Procmon logs.
   under instrumentation must not be called a verified fix.
 - Hook API locations and code windows before/instrumented/restored are logged.
   No client offset/signature is invented. Original client-file SHA-256 is checked
-  before/after. The game file is not written or included in the upload ZIP.
+  before/after. A hash-verified original backup is retained locally under
+  `original-backup`, excluded from the upload ZIP. The original game file is
+  never written.
 - Hooks are disabled at completion or after the DLL's 120-second timeout. The
   diagnostic module/trampolines remain mapped until normal process exit to avoid
   freeing an in-flight callback. Close WoW before any subsequent attempt.
