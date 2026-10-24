@@ -1,0 +1,50 @@
+name: Windows API diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/windows-api-diagnostics/**"
+      - ".github/workflows/windows-api-diagnostics.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure x64 diagnostics with a pinned hook library
+        run: cmake -S scripts/windows-api-diagnostics -B api-build -A x64 -DFOREVER_DIAGNOSTIC_REVISION=${{ github.sha }}
+
+      - name: Build diagnostics
+        run: cmake --build api-build --config Release --parallel 2
+
+      - name: Verify instrumentation in an owned test process
+        shell: pwsh
+        run: |
+          & ./api-build/Release/Forever-API-Diagnose.exe --self-test "$env:RUNNER_TEMP"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error title=Native API diagnostic self-test failed::Injection, readiness, original API behavior or captured outcomes failed validation."
+            exit 1
+          }
+
+      - name: Package only the verified helper
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory api-package | Out-Null
+          Copy-Item api-build/Release/Forever-API-Diagnose.exe, api-build/Release/ForeverSocketTrace.dll api-package/
+          Copy-Item scripts/windows-api-diagnostics/README.txt api-package/
+          Copy-Item api-build/MinHook-LICENSE.txt api-package/
+          Copy-Item LICENSE api-package/Forever-LICENSE.txt
+          Set-Content api-package/diagnostic-build.txt "revision=${{ github.sha }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: START-HIER-Forever-API-Diagnose
+          path: api-package/
+          if-no-files-found: error

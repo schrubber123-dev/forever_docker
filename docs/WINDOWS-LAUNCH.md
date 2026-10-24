@@ -222,6 +222,66 @@ Sources: [Winsock tracing control](https://learn.microsoft.com/en-us/windows/win
 [information-level events](https://learn.microsoft.com/en-us/windows/win32/winsock/winsock-tracing-levels),
 [event fields](https://learn.microsoft.com/en-us/windows/win32/winsock/winsock-tracing-event-details).
 
+## AFD/DNS capture result and next native diagnostic
+
+The user's `Forever-Network-20261024-121543-7ec508c9.zip` is a real capture
+(`SelfTest=False`), with WowB PID 15068. It contains 18,488 decoded AFD events
+and 241 DNS events, zero lost events/buffers, and starts before WowB. AFD used
+about 2.46 MiB of its 8 MiB circular limit, so initial socket events are retained.
+The XML schema warnings affect two system partition-header records, not decoded
+AFD/DNS payloads.
+
+Socket-create records identify WowB through `ProcessId=0x3ADC` and its kernel
+Process field. Its 23 recorded connect requests target loopback or public
+HTTP/HTTPS, never private TCP/1119. The private port checks belong to launcher
+PID 8288, at 20-second intervals, not to the game.
+
+The private hostname resolves successfully to `192.168.188.106`; the final
+caller response contains the mapped address `::ffff:192.168.188.106`. Neither
+an intermediate DNS status 87 nor missing native AAAA records establishes a DNS
+failure. The same game successfully uses another mapped-IPv4 DNS result for
+public HTTPS, so this alone does not justify an IPv4-forcing patch.
+
+Immediately after the private DNS result, a game-owned IPv4/TCP socket is created
+and closed approximately 3 ms later without a recorded bind/connect. That socket
+has no destination label, so the temporal association is not proof of its
+intended endpoint. The recorded `STATUS_CONNECTION_REFUSED` belongs to an early
+loopback Agent attempt that subsequently succeeds; a reset belongs to a public
+HTTPS socket. Neither is a captured private-server rejection.
+
+This locates the remaining gap before a private connection reaches AFD. It does
+not identify a client branch to bypass or prove that Agent product state causes
+the failure. The socket API's immediate return value and close caller are now
+more useful than additional ordinary Agent or Procmon logs.
+
+`scripts/windows-api-diagnostics/` therefore implements **instrumentation only**:
+
+- A standalone x64 helper waits for a newly started, version-validated 70450
+  `WowB.exe`, while the user continues to start it from the normal launcher.
+- A diagnostic DLL temporarily instruments Windows socket APIs with a pinned
+  MinHook revision. It records numeric socket metadata, API returns/errors and
+  call-site module/RVA stacks. It does not override Agent, versions, endpoint
+  selection or authentication, and does not collect buffers, credentials,
+  registry values or environments.
+- Original return values and pre/post last-error state are preserved. Timing
+  and module loading can still influence a diagnostic run; changed behavior
+  under instrumentation must not be called a verified fix.
+- Hook API locations and code windows before/instrumented/restored are logged.
+  No client offset/signature is invented. Original client-file SHA-256 is checked
+  before/after. The game file is not written or included in the upload ZIP.
+- Hooks are disabled at completion or after the DLL's 120-second timeout. The
+  diagnostic module/trampolines remain mapped until normal process exit to avoid
+  freeing an in-flight callback. Close WoW before any subsequent attempt.
+- `ConnectEx` coverage is for the resolved default provider. Unknown providers
+  or bypassed APIs remain limitations; missing calls are not proof of a particular
+  Agent gate. ZIP contents are restricted to the socket log and run markers.
+
+The separate Windows API diagnostics workflow builds with static CRT, fetches
+MinHook by immutable commit, and tests injection only into an owned child process.
+It must verify successful/refused socket calls, invalid-socket errors, metadata
+capture, original error behavior, live hook restoration, and ZIP export before
+publishing the diagnostic artifact. This is not a game-readiness claim.
+
 ## Earlier compilation checks
 
 Run `cargo test --locked --lib` in `app/src-tauri` with `FOREVER_CA_CERT` set to a
